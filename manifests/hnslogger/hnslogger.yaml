@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: hnslogger
+  labels:
+    app: hnslogger
+spec:
+  selector:
+    matchLabels:
+      name: hnslogger
+  template:
+    metadata:
+      labels:
+        name: hnslogger
+    spec:
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\SYSTEM"
+      hostNetwork: true
+      containers:
+      - name: hnslogger
+        image: mcr.microsoft.com/windows/servercore:ltsc2022
+        command:
+        - powershell.exe
+        - -Command
+        - | 
+            $LogDirectory = "c:\k\hnslogs\"
+            mkdir $LogDirectory -ErrorAction SilentlyContinue
+            cd $LogDirectory
+            
+            function rotateLogs {
+              $MaxLogFileCount = 5      # Maximum number of log files to keep
+
+              # Get the list of log files in the directory
+              $LogFiles = Get-ChildItem -Path $LogDirectory -Filter "hnslogs*.etl" | Sort-Object -Property LastWriteTime
+
+              # Check if the number of log files exceeds the maximum allowed
+              if ($LogFiles.Count -gt $MaxLogFileCount) {
+                  # Determine how many files to delete
+                  $FilesToDeleteCount = $LogFiles.Count - $MaxLogFileCount
+
+                  # Delete the oldest log files until the count is within the limit
+                  $FilesToDelete = $LogFiles | Select-Object -First $FilesToDeleteCount
+                  $FilesToDelete | ForEach-Object {
+                      Write-Host "Deleting log file: $($_.Name)"
+                      Remove-Item -Path $_.FullName -Force
+                  }
+              }
+            }
+              # Begin HNS trace
+            pktmon start --trace -p Microsoft-Windows-Host-Network-Service -l 4 -m multi-file -f hnslogs.etl -s 256;
+            while(1) {
+              sleep 1200
+              rotateLogs
+              }
+        imagePullPolicy: IfNotPresent
+        volumeMounts:
+          - name: kube-path
+            mountPath: C:\k
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - powershell.exe
+              - -Command
+              - "pktmon stop;sleep 20"
+      terminationGracePeriodSeconds: 60
+      volumes:
+      - name: kube-path
+        hostPath:
+          path: C:\k
+      nodeSelector:
+        kubernetes.io/os: windows
