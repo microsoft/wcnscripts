@@ -20,7 +20,7 @@ spec:
       hostNetwork: true
       containers:
       - name: hnslogger
-        image: mcr.microsoft.com/windows/servercore:ltsc2022
+        image: mcr.microsoft.com/windows/servercore:ltsc2019
         command:
         - powershell.exe
         - -Command
@@ -30,7 +30,7 @@ spec:
             cd $LogDirectory
             
             function rotateLogs {
-              $MaxLogFileCount = 5      # Maximum number of log files to keep
+              $MaxLogFileCount = 4      # Maximum number of log files to keep
 
               # Get the list of log files in the directory
               $LogFiles = Get-ChildItem -Path $LogDirectory -Filter "hnslogs*.etl" | Sort-Object -Property LastWriteTime

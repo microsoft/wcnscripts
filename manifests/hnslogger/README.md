@@ -4,11 +4,11 @@ A manifest to monitor basic HNS activity at levels:
   * 4 - (info) errors + HNS RPC calls
   * 6 - all activity (*VERY* noisy)
 
-By default, it will rotate the traces so that only the 5 newest trace files are preserved (filesize ~256 MB).
+By default, it will rotate the traces so that only the 4 newest trace files are preserved (filesize ~500 MB). When you stop the trace, there should be 5 log files.
 
 ## Usage
 ```
-kubectl apply -f hnsloggger.yaml
+kubectl apply -f hnsloggger2022.yaml
 ```
 Will schedule hnslogger DaemonSet pods onto every Windows node. This will use level 4 by default and write `hnslogs.etl` files into directory `C:\k\hnslogs`.
 

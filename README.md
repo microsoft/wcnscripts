@@ -8,6 +8,47 @@
 ## Manifests directory
 [manifests](./manifests) contains manifests (.yaml) to help monitor/remedy K8s Windows networking issues. 
 
+
+## Examples
+
+### Kube-proxy / CNI issues:
+To investigate kube-proxy or CNI issues, run the following:
+  1. Before the repro: [collect-windows-logs](http://aka.ms/collect-windows-logs)
+  2. Start HNS trace: [starthnstrace.ps1](./scripts/starthnstrace/starthnstrace.ps1)
+  3. Reproduce the issue
+  4. Stop the HNS trace: press 'q' in shell from step #2
+  5. After the repro: [collect-windows-logs](http://aka.ms/collect-windows-logs)
+
+
+### Data path issues:
+To investigate data path issues such as intermittent packet loss:
+  1. Before the repro: [collect-windows-logs](http://aka.ms/collect-windows-logs)
+  2. Start packet trace: [startpacketcapture.ps1](./scripts/startpacketcapture/startpacketcapture.ps1)
+  3. Reproduce the issue
+  4. Stop the packet capture trace: press 'q' in shell from step #2
+  5. After the repro: [collect-windows-logs](http://aka.ms/collect-windows-logs)
+
+
+### Control-plane issues:
+To investigate control-plane issues, run the following:
+  1. Before the repro: [collect-windows-logs](http://aka.ms/collect-windows-logs)
+  2. Start HNS trace: [starthnstrace.ps1](./scripts/starthnstrace/starthnstrace.ps1)
+  3. Reproduce the issue
+  4. Stop the HNS trace: press 'q' in shell from step #2
+  5. After the repro: [collect-windows-logs](http://aka.ms/collect-windows-logs)
+
+
+### DNS issues:
+To investigate DNS issues:
+  1. Before the repro: [collect-windows-logs](http://aka.ms/collect-windows-logs)
+  2. Start monitoring DNS rules/policies/counters: [monitorDNS](./scripts/monitorDNS/monitorDNS.ps1)
+  3. Start packet trace: [startpacketcapture.ps1](./scripts/startpacketcapture/startpacketcapture.ps1)
+  4. Reproduce the issue
+  5. Stop the packet capture trace: press 'q' in shell from step #3
+  6. Stop the DNS monitoring from step #2 (press Ctrl+C) 
+  7. After the repro: [collect-windows-logs](http://aka.ms/collect-windows-logs)
+
+
 ### Contributing
 
 This project welcomes contributions and suggestions.  Most contributions require you to agree to a
