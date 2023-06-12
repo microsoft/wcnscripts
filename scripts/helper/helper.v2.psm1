@@ -4,7 +4,7 @@
 #
 
 $Global:BaseDir = "c:\k"
-$Global:GithubSDNRepository = 'Microsoft/SDN'
+$Global:GithubSDNRepository = 'Microsoft/wcnscripts'
 $Global:GithubSDNBranch = 'master'
 $Global:NetworkName = "cbr0"
 $Global:NetworkMode = "l2bridge"

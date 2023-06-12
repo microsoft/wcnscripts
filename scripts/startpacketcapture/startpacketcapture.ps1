@@ -302,7 +302,7 @@ if (-NOT $NoPrompt.IsPresent)
             # try to download collectlogs.ps1
             try 
             {
-                $isCLFnd = Get-WebFile -URI 'https://raw.githubusercontent.com/microsoft/SDN/master/Kubernetes/windows/debug/collectlogs.ps1' -savePath "$BaseDir" -fileName 'collectlogs.ps1'
+                $isCLFnd = Get-WebFile -URI 'https://raw.githubusercontent.com/microsoft/wcnscripts/master/scripts/collectlogs/collectlogs.ps1' -savePath "$BaseDir" -fileName 'collectlogs.ps1'
             }
             catch 
             {
