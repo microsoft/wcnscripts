@@ -1015,14 +1015,22 @@ class ValidDNSLoadbalancerPolicy : DiagnosticTest {
 
         $this.Status = [TestStatus]::Passed
         $dns_policy = 0
+        $dns_port_policy = 0
         foreach ($lbPolicy in $lbPolicies) {  
             if($lbPolicy.VIP -eq $networkData.DnsIp) {
                 $dns_policy += 1
-            }  
+            }
+            if(($lbPolicy.InternalPort -eq 53) -and ($lbPolicy.ExternalPort -eq 53)) {
+                $dns_port_policy += 1
+            } 
         }
         if ($dns_policy -eq 0) {
             $this.Status = [TestStatus]::Failed
             $this.RootCause = "DNS IP Policy missing"
+            $this.Resolution = "Restart the kubeproxy service to reconfigure the LoadBalancer policies: Restart-Service kubeproxy" 
+        } elseif ($dns_port_policy -le 1) {
+            $this.Status = [TestStatus]::Failed
+            $this.RootCause = "DNS Port Policy is missing"
             $this.Resolution = "Restart the kubeproxy service to reconfigure the LoadBalancer policies: Restart-Service kubeproxy" 
         }
         return $this.Status
