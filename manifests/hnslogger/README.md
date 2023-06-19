@@ -10,7 +10,7 @@ By default, it will rotate the traces so that only the 4 newest trace files are 
 ```
 kubectl apply -f hnsloggger2022.yaml
 ```
-Will schedule hnslogger DaemonSet pods onto every Windows node. This will use level 4 by default and write `hnslogs.etl` files into directory `C:\k\hnslogs`.
+Will schedule hnslogger DaemonSet pods onto every Windows node. This will use level 4 by default and write `hnslogs.etl` files into directory `C:\k\\debug\hnslogs`.
 
 ## Parameters
 `pktmon start --trace -p Microsoft-Windows-Host-Network-Service -l 4 -m multi-file -f hnslogs.etl -s 256;`

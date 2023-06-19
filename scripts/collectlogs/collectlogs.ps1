@@ -12,6 +12,7 @@ if ((Test-Path env:GITHUB_SDN_REPOSITORY) -and ($env:GITHUB_SDN_REPOSITORY -ne '
 }
 
 $BaseDir = "c:\k\debug"
+$hnsLogsDir = $BaseDir + "\hnslogs\"
 md $BaseDir -ErrorAction Ignore
 
 $helper = "$BaseDir\helper.psm1"
@@ -289,5 +290,8 @@ Copy-Item "$env:SystemDrive\Windows\logs\NetSetup" -Destination logs -Recurse
 Copy-Item "$env:SystemDrive\Windows\logs\dism" -Destination logs -Recurse
 Copy-Item "$env:SystemDrive\Windows\logs\cbs" -Destination logs -Recurse
 
+# HNS logs
+New-Item -Path hnslogs -ItemType Directory
+Copy-Item ($hnsLogsDir + "hnslogs*.etl") -Destination hnslogs -Recurse -ErrorAction Ignore
 popd
 Write-Host "Logs are available at $outDir"
