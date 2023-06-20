@@ -9,6 +9,6 @@ In AKS Periscope, [kustomization.yaml](./kustomization.yaml) is used to define t
   1. Request blob storage from Microsoft support or create your own blob storage and generate a SAS key
   2. Configure the `kustomization.yaml`. Replace the placeholders `<strgAcctName>`, `<containerName>`, `<runId>`, and `<sasKey>` with the appropriate values.
   3. Apply the yaml in the AKS cluster 
-     * `kubectl apply -f kustomization.yaml`
+     * `kubectl apply -k <kustomization_directory>`
 
 This should collect the required logs to troubleshoot networking issues from all the Windows worker nodes on the AKS cluster and place them in the blob store.
