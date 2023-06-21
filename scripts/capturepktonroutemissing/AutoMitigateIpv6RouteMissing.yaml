@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: auto-mitigate-route-missing
+  labels:
+    app: auto-mitigate-route-missing
+spec:
+  selector:
+    matchLabels:
+      name: auto-mitigate-route-missing
+  template:
+    metadata:
+      labels:
+        name: auto-mitigate-route-missing
+    spec:
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\SYSTEM"
+      hostNetwork: true
+      containers:
+      - name: auto-mitigate-route-missing
+        image: mcr.microsoft.com/dotnet/framework/samples:aspnetapp
+        command:
+        - powershell.exe
+        - -command
+        - |
+            
+            $defaultGwPrefix = "::/0"
+            $defaultRouteNextHop = "fe80::1234:5678:9abc"
+            $hostRouteNextHop = "::"
+            
+            $ip = (Get-HnsNetwork | Select ManagementIPv6)[0].ManagementIPv6
+            $ifIndex = (Get-NetIPAddress -IPAddress $ip | Select InterfaceIndex).InterfaceIndex
+
+            $defaultRouteCounter = 0
+
+            While($true) {
+              
+              $defaultRouteEntry = (Get-NetRoute -InterfaceIndex $ifIndex -NextHop $defaultRouteNextHop -DestinationPrefix $defaultGwPrefix)
+              if(($defaultRouteEntry -eq $null) -or (($defaultRouteEntry).ifIndex -ne $ifIndex)) {
+                $defaultRouteCounter++
+                Write-Host "Default Route entry missing. Re-adding the default route manually. Default Route Counter : $defaultRouteCounter"
+                New-NetRoute -DestinationPrefix $defaultGwPrefix -AddressFamily IPv6 -NextHop $defaultRouteNextHop -InterfaceIndex $ifIndex
+              } else {
+                Write-Host "Default Route Counter : $defaultRouteCounter . Default route entry present : "
+                Write-Host "=========================="
+                $defaultRouteEntry
+                Write-Host "=========================="
+              }
+
+              Start-Sleep -Seconds 20
+            }
+
+        securityContext:
+          privileged: true
+      nodeSelector:
+        kubernetes.azure.com/os-sku: Windows2022
