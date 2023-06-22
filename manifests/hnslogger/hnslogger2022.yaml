@@ -77,4 +77,5 @@ spec:
         hostPath:
           path: C:\k
       nodeSelector:
+        kubernetes.azure.com/os-sku: Windows2022
         kubernetes.io/os: windows

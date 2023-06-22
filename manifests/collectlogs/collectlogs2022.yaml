@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wcn-debug
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: collectlogs
+  namespace: wcn-debug
+  labels:
+    app: collectlogs
+spec:
+  selector:
+    matchLabels:
+      name: collectlogs
+  template:
+    metadata:
+      labels:
+        name: collectlogs
+    spec:
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\SYSTEM"
+      hostNetwork: true
+      containers:
+      - name: collectlogs
+        image: mcr.microsoft.com/windows/nanoserver:ltsc2022
+        command:
+        - powershell.exe
+        - -command
+        - |
+            $LogDirectory = "c:\k\debug\hnslogs\"
+            mkdir $LogDirectory -ErrorAction SilentlyContinue
+            cd $LogDirectory
+            C:\k\debug\collectlogs.ps1
+            Write-Output DONE
+            ping -t localhost | Out-Null
+
+        securityContext:
+          privileged: true
+      nodeSelector:
+        kubernetes.azure.com/os-sku: Windows2022
+        kubernetes.io/os: windows
+        kubernetes.io/hostname: <repro_hostname>

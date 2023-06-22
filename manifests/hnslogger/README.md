@@ -6,6 +6,8 @@ A manifest to monitor basic HNS activity at levels:
 
 By default, it will rotate the traces so that only the 4 newest trace files are preserved (filesize ~500 MB). When you stop the trace, there should be at most 5 log files.
 
+NOTE: Currently, the hnslogger only contains activity for HNS at medium verbosity. Depending on the nature of the issue, it may be required to expand the list of components to monitor and/or verbosity to further diagnose the issue.
+
 ## Usage
 ```
 kubectl apply -f hnsloggger2022.yaml
