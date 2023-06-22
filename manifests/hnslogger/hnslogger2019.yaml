@@ -1,7 +1,13 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wcn-debug
+---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: hnslogger
+  namespace: wcn-debug
   labels:
     app: hnslogger
 spec:
@@ -49,7 +55,7 @@ spec:
               }
             }
               # Begin HNS trace
-            pktmon start --trace -p Microsoft-Windows-Host-Network-Service -l 4 -m multi-file -f hnslogs.etl -s 256;
+            pktmon start --trace -p Microsoft-Windows-Host-Network-Service -l 4 -m multi-file -f hnslogs.etl;
             while(1) {
               sleep 1200
               rotateLogs

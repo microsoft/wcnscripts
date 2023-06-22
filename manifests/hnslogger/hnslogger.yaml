@@ -26,7 +26,7 @@ spec:
       hostNetwork: true
       containers:
       - name: hnslogger
-        image: mcr.microsoft.com/windows/nanoserver:ltsc2022
+        image: mcr.microsoft.com/oss/kubernetes/windows-host-process-containers-base-image:v1.0.0
         command:
         - powershell.exe
         - -Command
