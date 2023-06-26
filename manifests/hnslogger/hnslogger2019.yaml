@@ -55,7 +55,7 @@ spec:
               }
             }
               # Begin HNS trace
-            pktmon start --trace -p Microsoft-Windows-Host-Network-Service -l 4 -m multi-file -f hnslogs.etl;
+            pktmon start --trace -p Microsoft-Windows-Host-Network-Service -l 4 -m multi-file -f hnslogs.etl -s 256;
             while(1) {
               sleep 1200
               rotateLogs
