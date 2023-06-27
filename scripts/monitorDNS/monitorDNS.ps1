@@ -6,7 +6,7 @@ Param(
 )
 
 # Helper functions
-function listDnsPolicies() {
+function GetDnsPolicyList() {
     $dnsPolicies = ((Get-HnsPolicyList | where { $_.Policies.InternalPort -EQ 53 } | where { $_.Policies.ExternalPort -EQ 53 }) | Select Policies, ID, References)
     return $dnsPolicies
 }
@@ -30,7 +30,7 @@ function dnsCountersToString($dnsRuleNames, $dnsCounters){
     }
 }
 
-function getDnsRules($portGuid, $dnsServerIP) {
+function GetDnsRulesOnVfpPort($portGuid, $dnsServerIP) {
     $lbRulesRaw = cmd /c "vfpctrl /port $portGuid /list-rule /layer LB_DSR /group LB_DSR_IPv4_OUT"
 
     $lbRules = $lbRulesRaw |
@@ -118,7 +118,7 @@ function getPortGuidMap() {
     return $macToPortGuids
 }
 
-function getDnsRulesAll($endpoints, $dnsServerIP, $verbose = $false) {
+function getDnsRulesForEndpoints($endpoints, $dnsServerIP, $verbose = $false) {
     $endpointDnsRuleNames = @{}
     $endpointDnsRules = @{}
     $endpointDnsCounters = @{}
@@ -127,14 +127,14 @@ function getDnsRulesAll($endpoints, $dnsServerIP, $verbose = $false) {
     $dnsRulesCount = 0
     $endpoints |
     ForEach-Object {
-        $dnsRules, $lbRules, $dnsCounters = getDnsRules $macToPortGuids[$_.MACaddress] $dnsServerIP
-        $endpointDnsRuleNames[$_.IPAddress] = $dnsRules
-        $endpointDnsRules[$_.IPAddress] = $lbRules
-        $endpointDnsCounters[$_.IPAddress] = $dnsCounters
-        $dnsRulesCount = $dnsRulesCount + $dnsRules.Count
+        $ruleNames, $rawRules, $ruleCounters = GetDnsRulesOnVfpPort $macToPortGuids[$_.MACaddress] $dnsServerIP
+        $endpointDnsRuleNames[$_.IPAddress] = $ruleNames
+        $endpointDnsRules[$_.IPAddress] = $rawRules
+        $endpointDnsCounters[$_.IPAddress] = $ruleCounters
+        $dnsRulesCount = $dnsRulesCount + $ruleNames.Count
         if ($verbose) {
-            Write-Output "Found DNS rules for pod $($_.IPAddress):`n$($dnsRules)" >> $FileName
-            Write-Output "Found LB rules for pod $($_.IPAddress):`n$($lbRules)" >> $FileName
+            Write-Output "Found DNS rules for pod $($_.IPAddress):`n$($ruleNames)" >> $FileName
+            Write-Output "Found LB rules for pod $($_.IPAddress):`n$($rawRules)" >> $FileName
         }
     }
     if ($dnsRulesCount -ne $expectedDnsRuleCount) {
@@ -148,22 +148,22 @@ function getDnsRulesAll($endpoints, $dnsServerIP, $verbose = $false) {
 
 # Main
 Remove-Item $FileName -ErrorAction SilentlyContinue
-while ((listDnsPolicies).Count -ne 2) {
+while ((GetDnsPolicyList).Count -ne 2) {
     Write-Output "Waiting for DNS policies..."
     start-sleep 5
 }
 Write-Output "Monitoring DNS rules in $FileName..."
 
-$oldDnsPolicies = listDnsPolicies
+$oldDnsPolicies = GetDnsPolicyList
 $dnsServerIP = $oldDnsPolicies[0].Policies.VIPs
 Write-Output "[OK] Found DNS Server VIP $($dnsServerIP)" >> $FileName
-Write-Output "[OK] Starting DNS policy: $(dnsPoliciesToString $oldDnsPolicies)" >> $FileName
+Write-Output "[OK] Initial DNS policies: $(dnsPoliciesToString $oldDnsPolicies)" >> $FileName
 
 if ($VerifyVfpRules) {
     # Get starting VFP DNS rules
-    $endpoints = (get-hnsendpoint | ? IsRemoteEndpoint -ne True) | Select-Object MACaddress, IPAddress
-    Write-Output "[OK] Querying starting DNS rules..." >> $FileName
-    $oldEndpointDnsRuleNames, $oldEndpointDnsRules, $oldEndpointDnsCounters = getDnsRulesAll $endpoints $dnsServerIP $true
+    $localEndpoints = (get-hnsendpoint | ? IsRemoteEndpoint -ne True) | Select-Object MACaddress, IPAddress
+    Write-Output "[OK] Querying initial DNS rules..." >> $FileName
+    $oldEndpointDnsRuleNames, $oldEndpointDnsRules, $oldEndpointDnsCounters = getDnsRulesForEndpoints $localEndpoints $dnsServerIP $true
 }
 
 for ($i = 0; $i -le ($WaitTime / $Interval); $i++) {
@@ -171,7 +171,7 @@ for ($i = 0; $i -le ($WaitTime / $Interval); $i++) {
     Write-Output "#====== Iteration : $i . Time : $timeNow " >> $FileName
     $iterationHealth = $true
     # Verify HNS DNS policies are consistent
-    $currentDnsPolicies = listDnsPolicies
+    $currentDnsPolicies = GetDnsPolicyList
     if (($currentDnsPolicies).Count -ne 2) {
         Write-Output "DNS policies not found!`nOld: $(dnsPoliciesToString $oldDnsPolicies).`nNew: $(dnsPoliciesToString $currentDnsPolicies)" >> $FileName
         # Skip analyzing the VFP rules until DNS policies are present again. 
@@ -193,7 +193,7 @@ for ($i = 0; $i -le ($WaitTime / $Interval); $i++) {
     if ($VerifyVfpRules) {
         # Verify DNS VFP rules are consistent across all endpoints
         $endpoints = (get-hnsendpoint | ? IsRemoteEndpoint -ne True) | Select-Object MACaddress, IPAddress
-        $endpointDnsRuleNames, $endpointDnsRules, $endpointDnsCounters = getDnsRulesAll $endpoints $dnsServerIP
+        $endpointDnsRuleNames, $endpointDnsRules, $endpointDnsCounters = getDnsRulesForEndpoints $endpoints $dnsServerIP
         # IP address in $endpoints currently exists. If it exists in old table, then pod was always here.
         # If it does not exist in old table, then it is a new pod. Need to add it there.
         $endpoints |
