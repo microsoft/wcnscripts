@@ -118,7 +118,7 @@ function getPortGuidMap() {
     return $macToPortGuids
 }
 
-function getDnsRulesForEndpoints($endpoints, $dnsServerIP, $verbose = $false) {
+function GetDnsRulesForEndpoints($endpoints, $dnsServerIP, $verbose = $false) {
     $endpointDnsRuleNames = @{}
     $endpointDnsRules = @{}
     $endpointDnsCounters = @{}
@@ -163,7 +163,7 @@ if ($VerifyVfpRules) {
     # Get starting VFP DNS rules
     $localEndpoints = (get-hnsendpoint | ? IsRemoteEndpoint -ne True) | Select-Object MACaddress, IPAddress
     Write-Output "[OK] Querying initial DNS rules..." >> $FileName
-    $oldEndpointDnsRuleNames, $oldEndpointDnsRules, $oldEndpointDnsCounters = getDnsRulesForEndpoints $localEndpoints $dnsServerIP $true
+    $oldEndpointDnsRuleNames, $oldEndpointDnsRules, $oldEndpointDnsCounters = GetDnsRulesForEndpoints $localEndpoints $dnsServerIP $true
 }
 
 for ($i = 0; $i -le ($WaitTime / $Interval); $i++) {
@@ -193,7 +193,7 @@ for ($i = 0; $i -le ($WaitTime / $Interval); $i++) {
     if ($VerifyVfpRules) {
         # Verify DNS VFP rules are consistent across all endpoints
         $endpoints = (get-hnsendpoint | ? IsRemoteEndpoint -ne True) | Select-Object MACaddress, IPAddress
-        $endpointDnsRuleNames, $endpointDnsRules, $endpointDnsCounters = getDnsRulesForEndpoints $endpoints $dnsServerIP
+        $endpointDnsRuleNames, $endpointDnsRules, $endpointDnsCounters = GetDnsRulesForEndpoints $endpoints $dnsServerIP
         # IP address in $endpoints currently exists. If it exists in old table, then pod was always here.
         # If it does not exist in old table, then it is a new pod. Need to add it there.
         $endpoints |
