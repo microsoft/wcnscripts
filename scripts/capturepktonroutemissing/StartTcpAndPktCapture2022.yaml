@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: start-tcp-pktmon-cap
+  labels:
+    app: start-tcp-pktmon-cap
+spec:
+  selector:
+    matchLabels:
+      name: start-tcp-pktmon-cap
+  template:
+    metadata:
+      labels:
+        name: start-tcp-pktmon-cap
+    spec:
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\SYSTEM"
+      hostNetwork: true
+      containers:
+      - name: start-tcp-pktmon-cap
+        image: mcr.microsoft.com/dotnet/framework/samples:aspnetapp
+        lifecycle:
+          preStop:
+            exec:
+              command: ["pktmon", "stop"]
+        command:
+        - powershell.exe
+        - -command
+        - |
+            $pktmonLogs = "C:\pktmonLogs"
+            $pathExists = Test-Path $pktmonLogs\info.txt
+
+            if($pathExists) {
+              netsh trace stop
+              While($true){
+                Write-Host "Route entry missing. Pktmon stopped. Logs are valid and will be available in dir : $pktmonLogs of the node."
+                Start-Sleep -Seconds 500
+              }
+            }
+            
+            $dstPrefix = "::/0"
+            $nextHop = "fe80::1234:5678:9abc"
+
+            $ip = (Get-HnsNetwork | Select ManagementIPv6)[0].ManagementIPv6
+            $ifIndex = (Get-NetIPAddress -IPAddress $ip | Select InterfaceIndex).InterfaceIndex
+
+            pktmon stop
+            pktmon filter remove
+            
+            Write-Host "Create a directory for pktmon logs..."
+            remove-item -Recurse -Force $pktmonLogs -ErrorAction Ignore
+            mkdir $pktmonLogs
+            Set-Location $pktmonLogs
+
+            pktmon start --capture --flags 0x1A --trace -p Microsoft-Windows-TCPIP -k 0xFFFFFFFFFFFFFFF -l 5
+
+            $entry = (Get-NetRoute -InterfaceIndex $ifIndex -NextHop $nextHop -DestinationPrefix $dstPrefix | Select NextHop, DestinationPrefix, ifIndex, InterfaceAlias, ValidLifeTime, PreferredLifetime)
+            $entryPresent = ($entry).ifIndex
+
+            While($entryPresent -eq $ifIndex) {
+              Write-Host "Route entry present : "
+              Write-Host "=========================="
+              $entry
+              Write-Host "=========================="
+
+              $now = Get-Date
+              tasklist /svc | sls "hns" > $pktmonLogs\info.txt
+              Write-Output "Cur time : $now " >> $pktmonLogs\info.txt
+              Write-Output "Management IP : $ip " >> $pktmonLogs\info.txt
+              Write-Output "==========================" >> $pktmonLogs\info.txt
+              Write-Output "PrevDefaultRouteEntry : " >> $pktmonLogs\info.txt
+              $entry >> $pktmonLogs\info.txt
+
+              Start-Sleep -Seconds 10
+              $entry = (Get-NetRoute -InterfaceIndex $ifIndex -NextHop $nextHop -DestinationPrefix $dstPrefix | Select NextHop, DestinationPrefix, ifIndex, InterfaceAlias, ValidLifeTime, PreferredLifetime)
+              $entryPresent = ($entry).ifIndex
+            }
+
+            Write-Host "Route entry missing. Stopping pktmon..."
+            Start-Sleep -Seconds 5
+            Write-Host "Stopping pktmon..."
+            pktmon stop
+            $validLogs = Test-Path $pktmonLogs\info.txt
+            
+            While($true) {
+              
+              if($validLogs) {
+                Write-Host "Route entry missing. Pktmon stopped. Logs are valid and will be available in dir : $pktmonLogs of the node."
+              } else {
+                Write-Host "Route entry missing. Pktmon stopped. Logs here are of no use."
+              }
+
+              Start-Sleep -Seconds 120
+            }
+
+        securityContext:
+          privileged: true
+      nodeSelector:
+        kubernetes.azure.com/os-sku: Windows2022

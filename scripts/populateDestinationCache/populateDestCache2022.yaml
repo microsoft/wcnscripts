@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: populate-dst-cache
+  labels:
+    app: populate-dst-cache
+spec:
+  selector:
+    matchLabels:
+      name: populate-dst-cache
+  template:
+    metadata:
+      labels:
+        name: populate-dst-cache
+    spec:
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\SYSTEM"
+      hostNetwork: true
+      containers:
+      - name: populate-dst-cache
+        image: mcr.microsoft.com/dotnet/framework/samples:aspnetapp
+        command:
+        - powershell.exe
+        - -command
+        - |
+            $nextHop = "fe80::1234:5678:9abc"
+
+            $ip = (Get-HnsNetwork | Select ManagementIPv6)[0].ManagementIPv6
+            $ifIndex = (Get-NetIPAddress -IPAddress $ip | Select InterfaceIndex).InterfaceIndex
+            
+            While($true) {
+              Start-Sleep -Seconds 10
+              Write-Host "Pinging gateway for populating destination cache..."
+              ping $nextHop%$ifIndex -S $ip -n 1
+            }
+
+        securityContext:
+          privileged: true
+      nodeSelector:
+        kubernetes.azure.com/os-sku: Windows2022
