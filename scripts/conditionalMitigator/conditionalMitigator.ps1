@@ -8,14 +8,25 @@ param (
     # time to sleep before checking whether HNS restart is required.
 
     [Parameter(Mandatory=$false)]
+    [int] $MinSleepIntervalMins = 1,
+    # time to sleep before checking whether HNS restart is required.
+
+    [Parameter(Mandatory=$false)]
     [int] $RuleCheckIntervalMins = 3,
     # if a rule is missing on an endpoint for more than RuleCheckIntervalMins minutes, we restart HNS
 
     [Parameter(Mandatory=$false)]
-    [int] $MaxHnsRestarts = 50,
+    [int] $MaxMitigationCount = 50,
 
     [Parameter(Mandatory=$false)]
-    [int] $MinRestartInterval = 5,
+    [int] $MinMitigationIntervalMins = 5,
+
+    [Parameter(Mandatory=$false)]
+    [int] $MitigationActionVal = 0,
+    # An enum indicating what mitigation action to take. Example, 0 indicates "restart HNS".
+
+    [Parameter(Mandatory=$false)]
+    [bool] $CollectWindowsLogs = $true,
 
     [Parameter(Mandatory=$false)]
     [string] $WindowsLogsPath = "C:\k\debug\ConditionalHnsRestart_data\"
@@ -36,23 +47,31 @@ class RuleCheckInfo {
 class EndpointInfo {
     [string]$id
     [System.DateTime]$notedTime
-    [bool] $rulesVerified
+    [int] $ruleCheckCount
+    [System.DateTime]$lastRuleCheckTime
 
     EndpointInfo([string] $inId, [System.DateTime] $inTime)
     {
         $this.id = $inId
         $this.notedTime = $inTime
-        $this.rulesVerified = $false
+        $this.ruleCheckCount = 0
     }
+}
+
+enum MitigationActionEnum {
+    E_RestartHns = 0
+    E_RestartKubeProxy
 }
 
 $g_scriptStartTime = get-date
 $g_endpointInfoMap = @{} # key = id, value = EndpointInfo
 $g_podRuleCheckList = [System.Collections.Generic.List[RuleCheckInfo]]::new() # array of RuleCheckInfo objects
-$g_hnsRestartCount = 0
-$g_lastHnsRestartTime = $g_scriptStartTime
+$g_mitigationActionCount = 0
+$g_lastMitigationTime = $g_scriptStartTime
 $g_nonPodPortRegex = "Container NIC|Host Vnic|ExternalPort"
-
+$RuleCheckIntervalSecs = $RuleCheckIntervalMins * 60
+$SleepIntervalSecs = $SleepIntervalMins * 60
+$MinMitigationIntervalSecs = $MinMitigationIntervalMins * 60
 
 function RulePresentInVfpPortGroup(
     [PSCustomObject] $portGroup,
@@ -66,14 +85,16 @@ function RulePresentInVfpPortGroup(
         $ruleIndex += 1
         if ($rule.Id -match $ruleToCheck.ruleRegex) {
             $ruleFound = $true
-
-    $msg = "rule {0} matches regex {1}." -f $rule.Id, $ruleToCheck.ruleRegex
-    write-host $msg
-
+            #$msg = "rule {0} matches regex {1}." -f $rule.Id, $ruleToCheck.ruleRegex
+            #write-host $msg
             break
         }
     }
 
+    if ($ruleFound -eq $false) {
+        $msg = "rule with regex {0} not found on group {1}" -f $ruleToCheck.ruleRegex, $portGroup.name
+        write-host $msg        
+    }
     return $ruleFound
 }
 
@@ -94,11 +115,13 @@ function RulePresentInVfpPortLayer(
         }
     }
     if ($groupFound -eq $false) {
+        $msg = "No group on layer {0} matches name {1}" -f ('"' + $ruleToCheck.layerName + '"'),$ruleToCheck.groupName
+        write-host $msg
         return $false
     }
 
-    $msg = "group {0} found in layer {1}." -f $ruleToCheck.groupName, $ruleToCheck.layerName
-    write-host $msg
+    #$msg = "group {0} found in layer {1}." -f $ruleToCheck.groupName, $ruleToCheck.layerName
+    #write-host $msg
 
     return RulePresentInVfpPortGroup -portGroup $layer.groups[$groupIndex] -ruleToCheck $ruleToCheck
 }
@@ -108,11 +131,10 @@ function RulesPresentOnVfpPort(
     [System.Collections.Generic.List[RuleCheckInfo]] $rulesToCheck
 )
 {
+    #write-host "RulesPresentOnVfpPort called"
     $layers = (vfpctrl /list-rule /port $portId /format 1 | convertfrom-json).Layers
 
     foreach ($ruleToCheck in $rulesToCheck) {
-        write-host ""
-
         # first find layer
         $layerFound = $false
         $layerIndex = -1
@@ -125,14 +147,18 @@ function RulesPresentOnVfpPort(
             }
         }
         if ($layerFound -eq $false) {
+            $msg = "No layer on port {0} matches name {1}" -f $portId, ('"' + $ruleToCheck.layerName + '"')
+            write-host $msg
             return $false
         }
 
-        $msg = "Layer {0} found on port {1}: {2}." -f $ruleToCheck.layerName, $portId, $layers[$layerIndex]
-        write-host $msg
+        #$msg = "Layer {0} found on port {1}: {2}." -f $ruleToCheck.layerName, $portId, $layers[$layerIndex]
+        #write-host $msg
 
         $rulePresentInLayer = RulePresentInVfpPortLayer -layer $layers[$layerIndex] -ruleToCheck $ruleToCheck
         if ($rulePresentInLayer -eq $false) {
+            $msg = "No rule on port {0} matches regex {1}." -f $portId, $ruleToCheck.ruleRegex
+            write-host $msg
             return $false
         }
     }
@@ -144,8 +170,7 @@ function PortIsPodPort(
     [PSCustomObject] $vfpPortInfo
 )
 {
-    if ($vfpPortInfo.id -match $g_nonPodPortRegex)
-    {
+    if ($vfpPortInfo.id -match $g_nonPodPortRegex) {
         return $false
     }
 
@@ -154,15 +179,13 @@ function PortIsPodPort(
 
 function RulesAreMissing() {
     $vfpPortList = ((vfpctrl /list-vmswitch-port /format 1 | convertfrom-json).Ports)
-    $current_time = get-date
     $vfpPortMap = @{}
 
-    $msg = "There are {0} ports in VFP." -f $vfpPortList.count
-    write-host $msg
+    #$msg = "There are {0} ports in VFP." -f $vfpPortList.count
+    #write-host $msg
 
     ## Note new endpoint IDs.
-    $msg = "$g_endpointInfoMap size before adding new ports {0}" -f $g_endpointInfoMap.count
-    write-host $msg
+    $priorSize = $g_endpointInfoMap.count
     foreach ($vfpPort in $vfpPortList)
     {
         $vfpPortMap.Add($vfpPort.Id, $vfpPort)
@@ -174,14 +197,14 @@ function RulesAreMissing() {
             $g_endpointInfoMap.Add($vfpPort.Id, $endpointInfo)
         }
     }
-    $msg = "$g_endpointInfoMap size after adding new ports {0}" -f $g_endpointInfoMap.count
+    $endpointsAdded = $g_endpointInfoMap.count - $priorSize
+    $msg = "new endpoints added to g_endpointInfoMap: {0}" -f $endpointsAdded
     write-host $msg
     ##
 
+
     ## Delete stale endpoint IDs, so that g_endpointInfoMap's size does not keep increasing forever.
     $stalePortIdList = @()
-    $msg = "$g_endpointInfoMap size before deleting stale ports {0}" -f $g_endpointInfoMap.count
-    write-host $msg
     foreach ($portId in $g_endpointInfoMap.Keys) {
         $portIdPresent = $false
         foreach ($vfpPort in $vfpPortList) {
@@ -195,42 +218,55 @@ function RulesAreMissing() {
             $stalePortIdList += @($portId)
         }
     }
+    $priorSize = $g_endpointInfoMap.count
     foreach ($portId in $stalePortIdList) {
-        # TODO: log this
+        $msg = "deleting stale endpoint ID {0}" -f $portId
+        write-host $msg
         $g_endpointInfoMap.Remove($portId)
     }
-    $msg = "$g_endpointInfoMap size after deleting stale ports {0}" -f $g_endpointInfoMap.count
+    
+    $endpointsDeleted = $g_endpointInfoMap.count - $priorSize
+    $msg = "old endpoints deleted from g_endpointInfoMap: {0}" -f $endpointsDeleted
     write-host $msg
     ##
 
 
+    ## Check pod port rules.
     foreach ($portId in $g_endpointInfoMap.Keys)
     {
-        if ($g_endpointInfoMap[$portId].rulesVerified -eq $true)
-        {
-            continue
-        }
-
         $isPodPort = PortIsPodPort -vfpPortInfo $vfpPortMap[$portId]
         if ($isPodPort -eq $false) {
-            # this could be external port or host vNIC
+            # this could be external port or host vNIC. Ignore.
             continue
         }
 
-        #$msg = "checking for rules on port name:{0} id:{1}" -f $vfpPortMap[$portId].name,$vfpPortMap[$portId].id
+        $current_time = get-date
+        $timeSinceLastCheck = $current_time - $g_endpointInfoMap[$portId].lastRuleCheckTime
+        if ($g_endpointInfoMap.ruleCheckCount -gt 0) {
+            if ($timeSinceLastCheck.TotalSeconds -lt $RuleCheckIntervalSecs) {
+                # check again later
+                continue
+            }
+        }
+
+        #$msg = "Checking for rules on port name:{0} id:{1}" -f $vfpPortMap[$portId].name,$vfpPortMap[$portId].id
         #write-host $msg
 
         $rulesPresent = RulesPresentOnVfpPort -portId $portId -rulesToCheck $g_podRuleCheckList
-        
-        #$msg = "rules present: {0}" -f $rulesPresent
-        #write-host $msg
-
-        if (($current_time - $g_endpointInfoMap[$portId].notedTime).TotalMinutes -gt $RuleCheckIntervalMins)
-        {
-            # hns must be restarted
-            return $true
+        if ($rulesPresent -eq $true) {
+            # This port has the necessary rules.
+            $g_endpointInfoMap[$portId].ruleCheckCount += 1
+            $g_endpointInfoMap[$portId].lastRuleCheckTime = $current_time
+            continue
         }
+
+        # We reach here when a port does not have the necessary rules for more than RuleCheckIntervalMins.
+        # Mitigation action must be taken.
+        $msg = "Rules missing on VFP port with ID {0} since last {1} minutes" -f $portId,$timeSinceLastCheck.TotalMinutes
+        write-host $msg
+        return $true
     }
+    ## Pod port rule check done.
 
     return $false
 }
@@ -241,50 +277,56 @@ function ScriptSetup()
         $ruleCheckInfo = [RuleCheckInfo]::New($rule.ruleRegex, $rule.layerName, $rule.groupName)
         $g_podRuleCheckList.Add($ruleCheckInfo)
     }
-    $msg = "Size of g_podRuleCheckList: {0}" -f $g_podRuleCheckList.count
+    $msg = "Number of pod port rules to check: {0}" -f $g_podRuleCheckList.count
     write-host $msg
-$msg = "rulesToCheck[0].layerName: {0}" -f $g_podRuleCheckList[0].layerName
-write-host $msg
-
 }
 
-function CheckIfRestartRequired()
+function CheckIfMitigationRequired()
 {
     $rulesMissing = RulesAreMissing
-    return $false
+    return $rulesMissing
 }
 
-function collectLogs(
+function collectLogsBeforeMitigation(
     [string]$LogsPath
 )
 {
     # create log path if not yet created.
     mkdir -Force $LogsPath
-    $originalPath = pwd
-    Set-Location $LogsPath
-    C:\k\debug\collect-windows-logs.ps1
-    Set-Location $originalPath
+
+    if ($CollectWindowsLogs -eq $true) {
+        write-host "collecting windows logs"
+        $originalPath = pwd
+        Set-Location $LogsPath
+        C:\k\debug\collect-windows-logs.ps1
+        Set-Location $originalPath
+    }
 }
 
-function restartHnsService()
+function ExecuteMitigationAction()
 {
-    restart-service -f hns
+    if ($MitigationActionEnum -eq [MitigationActionEnum]::E_RestartHns) {
+        write-host "restarting HNS"
+        restart-service -f hns
+    }
 }
+
 
 function myMain()
 {
     ScriptSetup
     while ($true)
     {
-        $restartRequired = CheckIfRestartRequired
+        write-host ""
+        $restartRequired = CheckIfMitigationRequired
 
         if ($restartRequired -eq $false) {
-            sleep ($SleepIntervalMins * 60)
+            sleep ($SleepIntervalSecs)
             continue
         }
 
         $current_time = get-date
-        $timeSinceLastRestart = $current_time - $g_lastHnsRestartTime
+        $timeSinceLastMitigation = $current_time - $g_lastMitigationTime
         $scriptAge = $current_time - $g_scriptStartTime
 
         ####
@@ -293,32 +335,40 @@ function myMain()
         {
             # current_time could be just after a reboot, or just after a HNS/kube-proxy restart.
             # Let's not restart yet.
-            sleep ($SleepIntervalMins * 60)
+            $msg = "Not taking mitigation-action since current time could be just after reboot/HNS/kube-proxy restart."
+            write-host $msg
+            sleep ($SleepIntervalSecs)
             continue
         }
-        elseif ($g_hnsRestartCount -ge $MaxHnsRestarts)
+        elseif ($g_mitigationActionCount -ge $MaxMitigationCount)
         {
-            # TODO: log("max HNS restarts already done. Shouldn't restart anymore.")
-            sleep ($SleepIntervalMins * 60)
+            $msg = "Not taking mitigation-action since MaxMitigationCount has been crossed. Shouldn't take action anymore."
+            write-host $msg
+            sleep ($SleepIntervalSecs)
             continue
         }
-        elseif ($timeSinceLastRestart.TotalMinutes -lt $MinRestartInterval)
+        elseif ($timeSinceLastMitigation.TotalSeconds -lt $MinMitigationIntervalSecs)
         {
-            # TODO: log("HNS restarted recently. Let's wait more.")
-            sleep ($timeSinceLastRestart.TotalSeconds)
+            $timeToSleepSecs = $MinMitigationIntervalSecs - $timeSinceLastMitigation.TotalSeconds
+            $timeToSleepMins = $timeToSleepSecs / 60
+            $msg = "Not taking mitigation-action since it was taken just {0} minutes ago. Checking again after {1} minutes" -f $timeSinceLastMitigation.TotalMinutes, $timeToSleepMins
+            write-host $msg
+            sleep ($timeToSleepSecs)
             continue
         }
         # All negative cases (i.e., conditions to not restart HNS end here.)
         ####
 
-        # TODO: log("")
-        collectLogs -LogsPath $WindowsLogsPath
-        
-        restartHnsService
+        $msg = "Collecting logs before mitigation"
+        write-host $msg
+        collectLogsBeforeMitigation -LogsPath $WindowsLogsPath        
 
-        $g_lastHnsRestartTime = get-date
-        $g_hnsRestartCount += 1
+        $msg = "Taking mitigation action..."
+        write-host $msg
+        ExecuteMitigationAction
 
+        $g_lastMitigationTime = get-date
+        $g_mitigationActionCount += 1
     }
 }
 
