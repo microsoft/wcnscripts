@@ -318,9 +318,9 @@ function myMain()
     while ($true)
     {
         write-host ""
-        $restartRequired = CheckIfMitigationRequired
+        $mitigationRequired = CheckIfMitigationRequired
 
-        if ($restartRequired -eq $false) {
+        if ($mitigationRequired -eq $false) {
             sleep ($SleepIntervalSecs)
             continue
         }
@@ -330,11 +330,11 @@ function myMain()
         $scriptAge = $current_time - $g_scriptStartTime
 
         ####
-        # Check conditions to not restart HNS.
+        # Conditions for not mitigating.
         if ($scriptAge.TotalMinutes -lt $SleepIntervalMins)
         {
             # current_time could be just after a reboot, or just after a HNS/kube-proxy restart.
-            # Let's not restart yet.
+            # We don't hurry yet. We check again after $SleepIntervalSecs.
             $msg = "Not taking mitigation-action since current time could be just after reboot/HNS/kube-proxy restart."
             write-host $msg
             sleep ($SleepIntervalSecs)
@@ -356,7 +356,7 @@ function myMain()
             sleep ($timeToSleepSecs)
             continue
         }
-        # All negative cases (i.e., conditions to not restart HNS end here.)
+        # All negative cases (i.e., conditions to not mitigate end here.)
         ####
 
         $msg = "Collecting logs before mitigation"
