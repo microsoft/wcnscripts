@@ -29,6 +29,9 @@ param (
     [bool] $CollectWindowsLogs = $true,
 
     [Parameter(Mandatory=$false)]
+    [bool] $PauseAtBeginning = $true,
+
+    [Parameter(Mandatory=$false)]
     [string] $WindowsLogsPath = "C:\k\debug\ConditionalHnsRestart_data\"
 )
 
