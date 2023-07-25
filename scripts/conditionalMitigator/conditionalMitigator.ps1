@@ -90,7 +90,7 @@ function LogWithTimeStamp(
 }
 
 
-function RulePresentInVfpPortGroup(
+function IsRulePresentInVfpPortGroup(
     [PSCustomObject] $portGroup,
     [RuleCheckInfo] $ruleToCheck
 )
@@ -135,7 +135,7 @@ function IsRulePresentInVfpPortLayer(
         return $false
     }
 
-    return RulePresentInVfpPortGroup -portGroup $layer.groups[$groupIndex] -ruleToCheck $ruleToCheck
+    return IsRulePresentInVfpPortGroup -portGroup $layer.groups[$groupIndex] -ruleToCheck $ruleToCheck
 }
 
 
