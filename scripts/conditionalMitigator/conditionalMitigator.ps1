@@ -376,7 +376,6 @@ function myMain()
         # All negative cases (i.e., conditions to not mitigate end here.)
         ####
 
-        LogWithTimeStamp -msgStr ("Collecting logs before mitigation")
         collectLogsBeforeMitigation -LogsPath $WindowsLogsPath        
 
         LogWithTimeStamp -msgStr ("Taking mitigation action...")
