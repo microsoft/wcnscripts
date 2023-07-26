@@ -54,10 +54,10 @@ class EndpointInfo {
     [int] $ruleCheckCount
     [System.DateTime]$lastRuleCheckTime
 
-    EndpointInfo([string] $inId, [System.DateTime] $inTime)
+    EndpointInfo([string] $inId)
     {
         $this.id = $inId
-        $this.notedTime = $inTime
+        $this.notedTime = get-date
         $this.ruleCheckCount = 0
         $this.lastRuleCheckTime = get-date  # Initializing with current time because otherwise it would have a garbage value.
     }
@@ -198,8 +198,7 @@ function NoteCurrentVfpPorts()
 
         if ($g_endpointInfoMap.ContainsKey($vfpPort.Id) -eq $false)
         {
-            $notedTime = get-date
-            $endpointInfo = [EndpointInfo]::New($vfpPort.Id, $notedTime)
+            $endpointInfo = [EndpointInfo]::New($vfpPort.Id)
             $g_endpointInfoMap.Add($vfpPort.Id, $endpointInfo)
         }
     }
@@ -246,14 +245,13 @@ function RulesAreMissing() {
         }
 
         $current_time = get-date
+        $timeSinceLastCheck = $current_time - $g_endpointInfoMap[$portId].lastRuleCheckTime
+
         if ($g_endpointInfoMap.ruleCheckCount -gt 0) {
-            $timeSinceLastCheck = $current_time - $g_endpointInfoMap[$portId].lastRuleCheckTime
             if ($timeSinceLastCheck.TotalSeconds -lt $RuleCheckIntervalSecs) {
                 # check again later
                 continue
             }
-        } else {
-            $timeSinceLastCheck = $current_time - $g_scriptStartTime
         }
 
         $rulesPresent = CheckForRulesOnVfpPort -portId $portId -rulesToCheck $g_podRuleCheckList
@@ -314,14 +312,25 @@ function collectLogsBeforeMitigation(
 }
 
 
+function RestartWinService(
+    [string]$serviceName
+) {
+    $oldPid = (Get-WmiObject -Class Win32_Service -Filter "Name LIKE '$serviceName'" | Select-Object -ExpandProperty ProcessId).ToString()
+    LogWithTimeStamp -msgStr ("Current {0} pid: {1}. Restarting {0}" -f $serviceName,$oldPid)
+
+    restart-service -f $serviceName
+
+    $newPid = (Get-WmiObject -Class Win32_Service -Filter "Name LIKE '$serviceName'" | Select-Object -ExpandProperty ProcessId).ToString()
+    LogWithTimeStamp -msgStr ("{0} pid after restart: {1}" -f $serviceName,$newPid)
+}
+
+
 function ExecuteMitigationAction()
 {
     if ($MitigationActionVal -eq [MitigationActionEnum]::E_RestartHns) {
-        LogWithTimeStamp -msgStr "restarting HNS"
-        restart-service -f hns
+        RestartWinService -serviceName "Hns"
     } elseif ($MitigationActionVal -eq [MitigationActionEnum]::E_RestartKubeProxy) {
-        LogWithTimeStamp -msgStr "restarting kubeproxy"
-        restart-service -f kubeproxy
+        RestartWinService -serviceName "kubeproxy"
     }
 }
 
@@ -383,6 +392,7 @@ function myMain()
 
         $g_lastMitigationTime = get-date
         $g_mitigationActionCount += 1
+        LogWithTimeStamp -msgStr ("Mitigation done {0} times." -f $g_mitigationActionCount)
         sleep($MinMitigationIntervalSecs)
     }
 }
