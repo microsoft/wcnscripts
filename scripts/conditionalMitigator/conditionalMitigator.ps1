@@ -190,7 +190,7 @@ function NoteCurrentVfpPorts()
     # reset g_currentVfpPortMap to empty map
     $g_currentVfpPortMap.Clear()
 
-    LogWithTimeStamp -msgStr "Adding new endpoints to g_endpointInfoMap"
+    LogWithTimeStamp -msgStr "Checking if new endpoints have been added"
     $priorSize = $g_endpointInfoMap.count
     foreach ($vfpPort in $vfpPortList)
     {
@@ -210,7 +210,7 @@ function NoteCurrentVfpPorts()
     LogWithTimeStamp -msgStr ("size of g_currentVfpPortMap: {0}" -f $g_currentVfpPortMap.count)
 
     ## Delete stale endpoint IDs, so that g_endpointInfoMap's size does not keep increasing forever.
-    LogWithTimeStamp -msgStr "Removing deleted endpoints from g_endpointInfoMap"
+    LogWithTimeStamp -msgStr "Checking if any endpoints have been deleted"
     $stalePortIdList = @()
     foreach ($portId in $g_endpointInfoMap.Keys) {
         $portIdPresent = $false
@@ -227,11 +227,10 @@ function NoteCurrentVfpPorts()
     }
     $priorSize = $g_endpointInfoMap.count
     foreach ($portId in $stalePortIdList) {
-        LogWithTimeStamp -msgStr ("deleting stale endpoint ID {0}" -f $portId)
         $g_endpointInfoMap.Remove($portId)
     }
 
-    $endpointsDeleted = $g_endpointInfoMap.count - $priorSize
+    $endpointsDeleted = $priorSize - $g_endpointInfoMap.count
     LogWithTimeStamp -msgStr ("old endpoints deleted from g_endpointInfoMap: {0}" -f $endpointsDeleted)
     ##
 }
