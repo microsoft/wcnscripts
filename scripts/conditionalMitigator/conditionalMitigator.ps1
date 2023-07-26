@@ -370,7 +370,7 @@ function myMain()
             LogWithTimeStamp -msgStr ("Not taking mitigation-action since MaxMitigationCount has been crossed. Going to infinite sleep.")
             SleepInfinitely
         }
-        elseif ($timeSinceLastMitigation.TotalSeconds -lt $MinMitigationIntervalSecs)
+        elseif (($g_mitigationActionCount -gt 0) -And ($timeSinceLastMitigation.TotalSeconds -lt $MinMitigationIntervalSecs))
         {
             $timeToSleepSecs = $MinMitigationIntervalSecs - $timeSinceLastMitigation.TotalSeconds
             $timeToSleepMins = $timeToSleepSecs / 60
