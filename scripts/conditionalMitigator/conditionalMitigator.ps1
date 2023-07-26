@@ -85,12 +85,12 @@ function LogWithTimeStamp(
 {
     $currentTime = (get-date).ToUniversalTime()
     $timestamp = $currentTime.ToShortDateString() + " " + $currentTime.ToLongTimeString()
-    $msg = $timestamp + " | " + $msgStr
+    $msg = (hostname) + " " + $timestamp + " | " + $msgStr
     write-host $msg
 }
 
 
-function RulePresentInVfpPortGroup(
+function IsRulePresentInVfpPortGroup(
     [PSCustomObject] $portGroup,
     [RuleCheckInfo] $ruleToCheck
 )
@@ -133,7 +133,7 @@ function IsRulePresentInVfpPortLayer(
         return $false
     }
 
-    return RulePresentInVfpPortGroup -portGroup $layer.groups[$groupIndex] -ruleToCheck $ruleToCheck
+    return IsRulePresentInVfpPortGroup -portGroup $layer.groups[$groupIndex] -ruleToCheck $ruleToCheck
 }
 
 
@@ -263,7 +263,7 @@ function RulesAreMissing() {
         if ($rulesPresent -eq $false) {
             # We reach here when a port does not have the necessary rules for more than RuleCheckIntervalMins.
             # Mitigation action must be taken.
-            LogWithTimeStamp -msgStr ("Rules missing on VFP port with ID {0} since atleast last {1} minutes" -f $portId,$timeSinceLastCheck.TotalMinutes)
+            LogWithTimeStamp -msgStr ("Rules missing on VFP port with ID {0} since atleast last {1:N2} minutes" -f $portId,$timeSinceLastCheck.TotalMinutes)
             return $true
         }
 
@@ -317,8 +317,6 @@ function collectLogsBeforeMitigation(
 
 function ExecuteMitigationAction()
 {
-    LogWithTimeStamp -msgStr ("MitigationActionVal is {0}" -f $MitigationActionVal)
-
     if ($MitigationActionVal -eq [MitigationActionEnum]::E_RestartHns) {
         LogWithTimeStamp -msgStr "restarting HNS"
         restart-service -f hns
@@ -340,7 +338,7 @@ function myMain()
 
     if ($PauseAtBeginning -eq $true) {
         LogWithTimeStamp -msgStr ("Script started. Current time could be just after reboot/HNS/kube-proxy restart. Sleeping for few mins before starting mitigation-checks.")
-        sleep ($SleepIntervalSecs)
+        sleep($SleepIntervalSecs)
     }
 
     while ($true)
@@ -349,7 +347,7 @@ function myMain()
         $mitigationRequired = CheckIfMitigationRequired
 
         if ($mitigationRequired -eq $false) {
-            sleep ($SleepIntervalSecs)
+            sleep($SleepIntervalSecs)
             continue
         }
 
@@ -372,8 +370,8 @@ function myMain()
                 $timeToSleepSecs = $MinSleepIntervalMins * 60
                 $timeToSleepMins = $timeToSleepSecs / 60
             }
-            LogWithTimeStamp -msgStr ("Not taking mitigation-action since it was taken just {0} minutes ago. Checking again after {1} minutes" -f $timeSinceLastMitigation.TotalMinutes, $timeToSleepMins)
-            sleep ($timeToSleepSecs)
+            LogWithTimeStamp -msgStr ("Not taking mitigation-action since it was taken just {0:N2} minutes ago. Checking again after {1:N2} minutes" -f $timeSinceLastMitigation.TotalMinutes, $timeToSleepMins)
+            sleep($timeToSleepSecs)
             continue
         }
         # All negative cases (i.e., conditions to not mitigate end here.)
@@ -387,6 +385,7 @@ function myMain()
 
         $g_lastMitigationTime = get-date
         $g_mitigationActionCount += 1
+        sleep($MinMitigationIntervalSecs)
     }
 }
 
