@@ -1,25 +1,56 @@
-$ServiceName = "Host Network Service"
-$CrashEventList = @()
-$MsgMatchString = "*The {0} service terminated unexpectedly*" -f $ServiceName
-(Get-WinEvent -FilterHashtable @{logname = 'System'; ProviderName = 'Service Control Manager' } | Select-Object -Property TimeCreated, Id, LevelDisplayName, Message | Where-Object Message -like $MsgMatchString) `
-    | ForEach-Object -Begin {} -Process {$CrashEventList += $_} -End {}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: hns-crash-event-checker
+  labels:
+    app: hns-crash-event-checker
+spec:
+  selector:
+    matchLabels:
+      name: hns-crash-event-checker
+  template:
+    metadata:
+      labels:
+        name: hns-crash-event-checker
+    spec:
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\SYSTEM"
+      hostNetwork: true
+      containers:
+      - name: hns-crash-event-checker
+        image: mcr.microsoft.com/windows/nanoserver:ltsc2022
+        args:
+        - powershell.exe
+        - -Command
+        - |
+            $ServiceName = "Host Network Service"
+            $CrashEventList = @()
+            $MsgMatchString = "*The {0} service terminated unexpectedly*" -f $ServiceName
+            (Get-WinEvent -FilterHashtable @{logname = 'System'; ProviderName = 'Service Control Manager' } | Select-Object -Property TimeCreated, Id, LevelDisplayName, Message | Where-Object Message -like $MsgMatchString) `
+                | ForEach-Object -Begin {} -Process {$CrashEventList += $_} -End {}
 
 
-$CrashInstancesStr = ""
+            $CrashInstancesStr = ""
 
-$i = 0
-foreach ($crashEvent in $CrashEventList)
-{
-    if ($i -eq 0) {
-        $CrashInstancesStr += $crashEvent.TimeCreated.ToString()
-    } else {
-        $CrashInstancesStr += ", " + $crashEvent.TimeCreated.ToString()
-    }
-    $i += 1
-}
+            $i = 0
+            foreach ($crashEvent in $CrashEventList)
+            {
+                if ($i -eq 0) {
+                    $CrashInstancesStr += $crashEvent.TimeCreated.ToString()
+                } else {
+                    $CrashInstancesStr += ", " + $crashEvent.TimeCreated.ToString()
+                }
+                $i += 1
+            }
 
-$(Hostname) + " : " + $CrashInstancesStr
+            $(Hostname) + " : " + $CrashInstancesStr
 
-While ($true) {
-  Start-Sleep -Seconds 600
-}
+            While ($true) {
+              Start-Sleep -Seconds 600
+            }
+
+        imagePullPolicy: IfNotPresent
+      nodeSelector:
+        kubernetes.azure.com/os-sku: Windows2022
