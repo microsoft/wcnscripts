@@ -1,17 +1,17 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: hns-crash-event-checker
+  name: crash-event-checker
   labels:
-    app: hns-crash-event-checker
+    app: crash-event-checker
 spec:
   selector:
     matchLabels:
-      name: hns-crash-event-checker
+      name: crash-event-checker
   template:
     metadata:
       labels:
-        name: hns-crash-event-checker
+        name: crash-event-checker
     spec:
       securityContext:
         windowsOptions:
@@ -19,7 +19,7 @@ spec:
           runAsUserName: "NT AUTHORITY\\SYSTEM"
       hostNetwork: true
       containers:
-      - name: hns-crash-event-checker
+      - name: crash-event-checker
         image: mcr.microsoft.com/windows/nanoserver:ltsc2022
         args:
         - powershell.exe
