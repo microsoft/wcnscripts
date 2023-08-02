@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: stop-pkt-cap
+  labels:
+    app: stop-pkt-cap
+spec:
+  selector:
+    matchLabels:
+      name: stop-pkt-cap
+  template:
+    metadata:
+      labels:
+        name: stop-pkt-cap
+    spec:
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\SYSTEM"
+      hostNetwork: true
+      containers:
+      - name: stop-pkt-cap
+        image: mcr.microsoft.com/dotnet/framework/samples:aspnetapp
+        command:
+        - powershell.exe
+        - -command
+        - |
+            $traceLogs = "C:\traceLogs"
+            Start-Sleep -Seconds 5
+            Write-Host "Stop netsh traces..."
+            netsh trace stop
+
+            Write-Host "Logs will be available in $traceLogs"
+            
+            While($true) {
+              Start-Sleep -Seconds 120
+            }
+
+        securityContext:
+          privileged: true
+      nodeSelector:
+        kubernetes.azure.com/os-sku: Windows2022

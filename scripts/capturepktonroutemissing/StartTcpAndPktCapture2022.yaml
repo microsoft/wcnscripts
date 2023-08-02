@@ -1,0 +1,136 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: start-pkt-cap
+  labels:
+    app: start-pkt-cap
+spec:
+  selector:
+    matchLabels:
+      name: start-pkt-cap
+  template:
+    metadata:
+      labels:
+        name: start-pkt-cap
+    spec:
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\SYSTEM"
+      hostNetwork: true
+      containers:
+      - name: start-pkt-cap
+        image: mcr.microsoft.com/dotnet/framework/samples:aspnetapp
+        command:
+        - powershell.exe
+        - -command
+        - |
+            $traceLogs = "C:\traceLogs"
+            $pathExists = Test-Path $traceLogs\info.txt
+
+            if($pathExists) {
+              Write-Host "Netsh trace already running..."
+            } else {
+              netsh trace stop
+              Write-Host "Create a directory for netsh logs..."
+              remove-item -Recurse -Force $traceLogs -ErrorAction Ignore
+              mkdir $traceLogs
+              Set-Location $traceLogs
+              netsh trace start provider=Microsoft-Windows-TCPIP level=5 provider="{EB004A05-9B1A-11D4-9123-0050047759BC}" keywords=0xFFFFFFFFFFF level=5 tracefile=tcpip.etl report=disabled perf=no fileMode=circular persistent=yes capture=yes
+            }
+
+            Set-Location $traceLogs
+            
+            $dstPrefix = "::/0"
+            $nextHop = "fe80::1234:5678:9abc"
+
+            $ip = (Get-HnsNetwork | Select ManagementIPv6)[0].ManagementIPv6
+            $ifIndex = (Get-NetIPAddress -IPAddress $ip | Select InterfaceIndex).InterfaceIndex
+
+            $netshStatus = netsh trace show status
+            $netshRunning = $netshStatus.Contains("There is no trace session currently in progress.") -eq $false
+
+            While($netshRunning) {
+
+              $entry = (Get-NetRoute -InterfaceIndex $ifIndex -NextHop $nextHop -DestinationPrefix $dstPrefix | Select NextHop, DestinationPrefix, ifIndex, InterfaceAlias, ValidLifeTime, PreferredLifetime)
+              $entryPresent = ($entry).ifIndex
+
+              if(($null -eq $entryPresent) -or ($empty -eq $entryPresent)) {
+                
+                Start-Sleep -Seconds 10
+                $entry = (Get-NetRoute -InterfaceIndex $ifIndex -NextHop $nextHop -DestinationPrefix $dstPrefix | Select NextHop, DestinationPrefix, ifIndex, InterfaceAlias, ValidLifeTime, PreferredLifetime)
+                $entryPresent = ($entry).ifIndex
+                
+                if(($null -eq $entryPresent) -or ($empty -eq $entryPresent)) {
+
+                  netsh trace stop
+                  Start-Sleep -Seconds 5
+
+                  netsh trace convert $traceLogs\tcpip.etl
+
+                  Write-Host "Route entry deleted. Stopping traces : "
+                  Write-Host "=========================="
+
+                  $now = Get-Date
+                  Write-Output "============Default route is deleted==============" >> $traceLogs\info.txt
+                  Write-Output "Default route is deleted at : $now " >> $traceLogs\info.txt
+                  tasklist /svc | sls "hns" >> $traceLogs\info.txt
+                  Write-Output "Management IP : $ip " >> $traceLogs\info.txt
+
+                  $routes = Get-NetRoute -AddressFamily IPv6
+                  $addresses = Get-NetIPAddress -AddressFamily IPv6
+                  $neighbours = Get-NetNeighbor -AddressFamily IPv6
+                  $interfaces = Get-NetIPInterface -AddressFamily IPv6
+                  $forwarding = Get-NetIPInterface -AddressFamily IPv6 | Select ifIndex, Forwarding
+
+                  Write-Output "Routes ========================= : " >> $traceLogs\info.txt
+                  $routes >> $traceLogs\info.txt
+
+                  Write-Output "Addresses ========================= : " >> $traceLogs\info.txt
+                  $addresses >> $traceLogs\info.txt
+
+                  Write-Output "Neighbours ========================= : " >> $traceLogs\info.txt
+                  $neighbours >> $traceLogs\info.txt
+
+                  Write-Output "Interfaces ========================= : " >> $traceLogs\info.txt
+                  $interfaces >> $traceLogs\info.txt
+
+                  Write-Output "Forwarding ========================= : " >> $traceLogs\info.txt
+                  $forwarding >> $traceLogs\info.txt
+
+                  break
+                }
+
+              }
+
+              Write-Host "Route entry present : "
+              Write-Host "=========================="
+              $entry
+              Write-Host "=========================="
+
+              $now = Get-Date
+              tasklist /svc | sls "hns" > $traceLogs\info.txt
+              Write-Output "Cur time : $now " >> $traceLogs\info.txt
+              Write-Output "Management IP : $ip " >> $traceLogs\info.txt
+              Write-Output "==========================" >> $traceLogs\info.txt
+              Write-Output "PrevDefaultRouteEntry : " >> $traceLogs\info.txt
+              $entry >> $traceLogs\info.txt
+              Start-Sleep -Seconds 10
+            }
+
+            $status = Get-Content $traceLogs\info.txt | sls "Default route is deleted"
+            $validLogs = $status -like "*Default route is deleted*"
+            
+            While($true) {
+              if($validLogs) {
+                Write-Host "Route entry missing. Netsh traces stopped. Logs are valid and will be available in dir : $traceLogs of the node."
+              } else {
+                Write-Host "Route entry missing. Netsh traces stopped. Logs here are of no use."
+              }
+              Start-Sleep -Seconds 1200
+            }
+
+        securityContext:
+          privileged: true
+      nodeSelector:
+        kubernetes.azure.com/os-sku: Windows2022
