@@ -36,3 +36,29 @@ If the `-OutputMode` is set to `Event` or `All`, the script will register a new 
     kubectl logs -l name=networkhealth --all-containers=true >> networkhealth.txt
     Provide the generated networkhealth.txt
 ```
+## Command to run startNetworkDiagnostics
+```
+Normal Execution: .\startNetworkDiagnostics.ps1 -TimeIntervalInSeconds 30 -PrintMatchedRules $true -PodNamePrefixes tcp-server,tcp-client
+
+Execution with DNS Packet Capture: .\startNetworkDiagnostics.ps1 -DnsPktCap $true
+
+Execution with DualStack Test: .\startNetworkDiagnostics.ps1 -DualStack $true
+
+Execution with Vfp Rule Counter Dump for Pods : .\startNetworkDiagnostics.ps1 -PodNamePrefixes tcp-client,tcp-server
+
+Execution with printing matched rule counter : .\startNetworkDiagnostics.ps1 -PodNamePrefixes tcp-client,tcp-server -PrintMatchedRules $true
+
+Execution with validate loadbalancer rules for Service IPS : .\startNetworkDiagnostics.ps1 -ServiceIPS "10.0.0.1,10.0.0.2"
+
+```
+
+## Command to run vfpDropCounterMetrics
+```
+.\vfpDropCounterMetrics.ps1 -TimeIntervalInSeconds 30 -PrintMatchedRules $true -PodNamePrefixes tcp-server,tcp-client
+```
+
+## DNS Health Check
+```
+Invoke-WebRequest https://raw.githubusercontent.com/microsoft/wcnscripts/2ea829ebaaf523cf58ef8e64120e54849eb4bd51/scripts/networkhealth/startNetworkDiagnostics.ps1 -OutFile startNetworkDiagnostics.ps1
+.\startNetworkDiagnostics.ps1
+```
