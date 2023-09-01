@@ -1,0 +1,81 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wcn-debug
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: packetcapture
+  namespace: wcn-debug
+  labels:
+    app: packetcapture
+spec:
+  selector:
+    matchLabels:
+      name: packetcapture
+  template:
+    metadata:
+      labels:
+        name: packetcapture
+    spec:
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\SYSTEM"
+      hostNetwork: true
+      containers:
+      - name: packetcapture
+        image: mcr.microsoft.com/windows/nanoserver:ltsc2022
+        command:
+        - powershell.exe
+        - -Command
+        - | 
+            $LogDirectory = "c:\k\debug\hnslogs\"
+            mkdir $LogDirectory -ErrorAction SilentlyContinue
+            cd $LogDirectory
+            
+            function rotateLogs {
+              $MaxLogFileCount = 40      # Maximum number of log files to keep
+
+              # Get the list of log files in the directory
+              $LogFiles = Get-ChildItem -Path $LogDirectory -Filter "packetcapture*.etl" | Sort-Object -Property LastWriteTime
+
+              # Check if the number of log files exceeds the maximum allowed
+              if ($LogFiles.Count -gt $MaxLogFileCount) {
+                  # Determine how many files to delete
+                  $FilesToDeleteCount = $LogFiles.Count - $MaxLogFileCount
+
+                  # Delete the oldest log files until the count is within the limit
+                  $FilesToDelete = $LogFiles | Select-Object -First $FilesToDeleteCount
+                  $FilesToDelete | ForEach-Object {
+                      Write-Host "Deleting log file: $($_.Name)"
+                      Remove-Item -Path $_.FullName -Force
+                  }
+              }
+            }
+              # Begin HNS trace
+            pktmon start --trace -p Microsoft-Windows-Host-Network-Service -p 2F07E2EE-15DB-40F1-90EF-9D7BA282188A -p 9F2660EA-CFE7-428F-9850-AECA612619B0 -p 1F387CBC-6818-4530-9DB6-5F1058CD7E86 -p 67DC0D66-3695-47c0-9642-33F76F7BD7AD -l 6 -m multi-file -f packetcapture.etl -s 256;
+            while(1) {
+              sleep 1200
+              rotateLogs
+              }
+        imagePullPolicy: IfNotPresent
+        volumeMounts:
+          - name: kube-path
+            mountPath: C:\k
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - powershell.exe
+              - -Command
+              - "pktmon stop;sleep 20"
+      terminationGracePeriodSeconds: 60
+      volumes:
+      - name: kube-path
+        hostPath:
+          path: C:\k
+      nodeSelector:
+        kubernetes.azure.com/os-sku: Windows2022
+        kubernetes.io/os: windows
