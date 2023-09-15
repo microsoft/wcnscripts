@@ -1,9 +1,7 @@
-# This script is provided by debjitmondal@microsoft.com
-#
 # Usage:
 # 1. Modify $PodNamePrefixes as required.
 # 2. Modify $TimeIntervalInSeconds.
-# 3. Control Flags: PodToExternalTraffic, ExternalTrafficToService
+# 3. Control Flags: ExternalTrafficToService
 # 4. Modify daemonset name and namespace name as suited.
 #
 apiVersion: v1

@@ -79,3 +79,4 @@ spec:
       nodeSelector:
         kubernetes.azure.com/os-sku: Windows2022
         kubernetes.io/os: windows
+        kubernetes.io/hostname: <repro_hostname>

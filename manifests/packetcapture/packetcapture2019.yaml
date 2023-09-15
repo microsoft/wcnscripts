@@ -78,3 +78,4 @@ spec:
           path: C:\k
       nodeSelector:
         kubernetes.io/os: windows
+        kubernetes.io/hostname: <repro_hostname>
