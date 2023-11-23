@@ -1,0 +1,466 @@
+            param(
+                [string] $NetworkName = "azure",
+                [string[]] $PodNamePrefixes = @("win-webserver"),
+                [int] $TimeIntervalInSeconds = 900,
+                [bool] $ExternalToService = $true,
+                [parameter(Mandatory = $false)] [string] $FileName = "rulecounters.txt", # Output file name
+                [parameter(Mandatory = $false)] [string] $LogDirectory = "c:\k\debug\hnslogs\" # Output directory
+            )
+            class Service {
+                [string]$ServiceVip
+                [string]$InternalPort
+                [string]$ExternalPort
+                [string]$Protocol
+                [bool]$IsETPLocal
+              }
+
+              class Pod {
+                [string]$Name
+                [string]$IPAddress
+                [string]$VfpPortGuid
+                [string]$EndpointId
+                [Service[]]$AssociatedServices = @()
+                [hashtable] $NetworkMetrics = @{}
+            }
+
+            class Node {
+                [Pod[]]$Pods = @()
+                [string]$Name
+                [hashtable] $NetworkMetrics = @{}
+            }
+
+            function Write-Log() {
+                param (
+                    [Parameter(Position=0,ValueFromPipeline=$true)]
+                    [string]$msg
+                )
+                $msg | ForEach-Object {
+                    Write-Host $_;
+                    $_ | Out-File -FilePath $FileName -Append;
+                }
+            }
+
+            function GetPODName {
+                param (
+                    [Parameter(Mandatory=$True)][string[]] $containerIdentifiers,
+                    [Object[]] $PodsInfo
+
+                ) 
+
+                $items = (($PodsInfo | ConvertFrom-Json).items)
+                foreach($podID in $containerIdentifiers)
+                {
+                    foreach($item in $items)
+                    {
+                        if ($item.id -Eq $podID) {
+                            return $item.metadata.name
+                        }
+                    }
+                }
+
+                return "unknown"
+            }
+
+
+            function GetPortCounter (
+                [string] $portId,
+                [string] $counterName,
+                [string] $Direction,
+                [Object[]] $portCounters
+            )
+            {
+
+                $counterValue = 0
+                $currDirection = "unknown"
+
+                foreach ($line in $portCounters) {
+
+                    if($line.trim() -match "Direction - OUT") {
+                        $currDirection = "OUT" 
+                    }
+                    if($line.trim() -match "Direction - IN") {
+                        $currDirection = "IN" 
+                    }
+
+                    if($currDirection -match $Direction) {
+                        $splitLines = $line.split(":")
+                        if ($splitLines.Count -eq 1) { 
+                            continue 
+                        }
+
+                        $key = $line.split(":")[0].trim()
+                        $value = $line.split(":")[1].trim()
+                        if ($key -eq $counterName) {
+                            $counterValue = [uint64]$value
+                        }
+
+                    }
+                }
+
+                return $counterValue
+            }
+
+            function MatchRuleCounter()
+            {
+              Param(
+                [ValidateNotNullorEmpty()]
+                [System.Object]$vfpRuleOutput = $(throw "Please provide a value for the VFP Rule output."),
+                [ValidateNotNullorEmpty()]
+                [string]$ruleRegex = $(throw "Please provide a value for RuleRegex."),
+                [ValidateNotNullorEmpty()]
+                [string]$counterName = $(throw "Please provide a value for CounterName.")
+              )
+
+                $counterValue = -1
+                $foundRule = $false
+                #Write-Log "Regex: $ruleRegex Group: $group Layer: $layer Out Count: $($vfpRuleOutput.length)`n"  
+                foreach($line in $vfpRuleOutput) {
+                    #Write-Log "Line: "+$line+"`n"
+                    if ($line -match $ruleRegex) {
+                        $foundRule = $true
+                        #Write-Log "Found Rule: "+$ruleRegex+"`n"
+                    }
+                    if ($foundRule -and ($line -match $counterName)) {
+                        $token = $line.split()
+                        $counterValue = $token[$token.Count - 1]
+                        #Write-Log $token" Counter -  "$counterValue
+                        break;
+                    }
+                }
+                return $counterValue
+            }
+
+            function GetRule()
+            {
+              Param(
+                    [ValidateNotNullorEmpty()]
+                    [string]$port = $(throw "Please provide a value for Port."),
+                    [ValidateNotNullorEmpty()]
+                    [string]$layer = $(throw "Please provide a value for Layer."),
+                    [ValidateNotNullorEmpty()]
+                    [string]$group = $(throw "Please provide a value for Group.")
+                )
+
+                $output = vfpCtrl.exe /port $port /layer $layer /group $group /get-rule-counter
+                Write-Log("`n------`n$output`n-------`n")  # Optimize: Capture get-rule-counter once and get all the required metrics
+                return $output
+            }
+
+            function GetHostPortGuid()
+            {
+              $output = vfpctrl.exe /list-vmswitch-port | Select-String -Pattern "Container NIC" -Context 1,0 | Out-String
+              $portGuid = $output.split(">")[0].split(":")[1].trim();
+              return $portGuid
+            }
+
+            function GetManagementIP()
+            {
+              $ManagementIp = ""
+              if ($PSVersionTable.PSVersion.Major -ge 6) {
+                  $result = Test-Connection -ComputerName $(hostname) -Count 1 -IPv4
+                  $ManagementIp = $result.Address.IPAddressToString
+              } else {
+                  $result = Test-Connection -ComputerName $(hostname) -Count 1
+                  $ManagementIp = $result.IPV4Address.IPAddressToString
+              }
+              return $ManagementIp
+            }
+
+             function PopulatePodMetrics(
+                [Pod] $pod
+            )
+            {
+                $MetricNameToPortCounterMapping = @{
+                    "PACKETS_INGRESS_TOTAL" = @{
+                        PortCounterName = "Total packets";
+                        Direction = "IN"};
+                    "PACKETS_EGRESS_TOTAL" = @{
+                        PortCounterName = "Total packets";
+                        Direction = "OUT"};
+                    "BYTES_INGRESS_TOTAL" = @{
+                        PortCounterName = "Total bytes";
+                        Direction = "IN"};
+                    "BYTES_EGRESS_TOTAL" = @{
+                        PortCounterName = "Total bytes";
+                        Direction = "OUT"};
+                    "SYN_PACKETS_INGRESS_TOTAL" = @{
+                        PortCounterName = "SYN packets";
+                        Direction = "IN"};
+                    "SYN_PACKETS_EGRESS_TOTAL" = @{
+                        PortCounterName = "SYN packets";
+                        Direction = "OUT"};
+                    "SYN_ACK_PACKETS_INGRESS_TOTAL" = @{
+                        PortCounterName = "SYN-ACK packets";
+                        Direction = "IN"};
+                    "SYN_ACK_PACKETS_EGRESS_TOTAL" = @{
+                        PortCounterName = "SYN-ACK packets";
+                        Direction = "OUT"};
+                    "FIN_PACKETS_INGRESS_TOTAL" = @{
+                        PortCounterName = "FIN packets";
+                        Direction = "IN"};
+                    "FIN_PACKETS_EGRESS_TOTAL" = @{
+                        PortCounterName = "FIN packets";
+                        Direction = "OUT"};
+                    "RST_PACKETS_INGRESS_TOTAL" = @{
+                        PortCounterName = "RST packets";
+                        Direction = "IN"};
+                    "RST_PACKETS_EGRESS_TOTAL" = @{
+                        PortCounterName = "RST packets";
+                        Direction = "OUT"};
+                    "TCP_CONNS_VERIFIED_INGRESS_TOTAL" = @{
+                        PortCounterName = "TCP Connections Verified";
+                        Direction = "IN"};
+                    "TCP_CONNS_VERIFIED_EGRESS_TOTAL" = @{
+                        PortCounterName = "TCP Connections Verified";
+                        Direction = "OUT"};
+                    "TCP_CONNS_TIMEDOUT_INGRESS_TOTAL" = @{
+                        PortCounterName = "TCP Connections Timed Out";
+                        Direction = "IN"};
+                    "TCP_CONNS_TIMEDOUT_EGRESS_TOTAL" = @{
+                        PortCounterName = "TCP Connections Timed Out";
+                        Direction = "OUT"};
+                    "TCP_CONNS_RESET_INGRESS_TOTAL" = @{
+                        PortCounterName = "TCP Connections Reset";
+                        Direction = "IN"};
+                    "TCP_CONNS_RESET_EGRESS_TOTAL" = @{
+                        PortCounterName = "TCP Connections Reset";
+                        Direction = "OUT"};
+                    "TCP_CONNS_RESET_BY_SYN_INGRESS_TOTAL" = @{
+                        PortCounterName = "TCP Connections Reset by SYN";
+                        Direction = "IN"};
+                    "TCP_CONNS_RESET_BY_SYN_EGRESS_TOTAL" = @{
+                        PortCounterName = "TCP Connections Reset by SYN";
+                        Direction = "OUT"};
+                    "TCP_CONNS_CLOSED_BY_FIN_INGRESS_TOTAL" = @{
+                        PortCounterName = "TCP Connections Closed by FIN";
+                        Direction = "IN"};
+                    "TCP_CONNS_CLOSED_BY_FIN_EGRESS_TOTAL" = @{
+                        PortCounterName = "TCP Connections Closed by FIN";
+                        Direction = "OUT"};
+                    "TCP_HALF_OPEN_TIMEOUTS_INGRESS_TOTAL" = @{
+                        PortCounterName = "TCP Half Open Timeouts";
+                        Direction = "IN"};
+                    "TCP_HALF_OPEN_TIMEOUTS_EGRESS_TOTAL" = @{
+                        PortCounterName = "TCP Half Open Timeouts";
+                        Direction = "OUT"};
+                }
+
+                $portId = $pod.VfpPortGuid
+                $portCounters = vfpctrl.exe /port $portId /get-port-counter
+
+                foreach ($metricName in $MetricNameToPortCounterMapping.Keys)
+                {
+                    $counterName = $MetricNameToPortCounterMapping[$metricName]["PortCounterName"]
+                    $direction = $MetricNameToPortCounterMapping[$metricName]["Direction"]
+                    $pod.NetworkMetrics[$metricName] = GetPortCounter -portId $portId -counterName $counterName -Direction $direction -portCounters $portCounters
+
+                    #Write-Log $pod.NetworkMetrics[$metricName]
+                }
+
+                $epId = $pod.EndpointId
+                $isHostPort = $pod.EndpointId -eq ""
+                if ($isHostPort) {
+                    if($ExternalToService) {
+                      foreach($svc in $pod.AssociatedServices) {
+                        $serviceVip = $svc.ServiceVip
+                        $extPort = $svc.ExternalPort
+                        $intPort = $svc.InternalPort
+                        $proto = $svc.Protocol
+                        $layer = "LB"
+                        $group = "LB_OUT_V4"
+                        #Write-Log "Host Port: "$portId"`n"
+
+                        if($svc.IsETPLocal) {
+                            $vfpRule = GetRule -port $portId -layer $layer -group $group
+                            $pod.NetworkMetrics["CONNECTIONS_EXTERNALTOSERVICE_TOTAL"] += [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex ("LB_\w*_{0}_{1}_{2}_{3}" -f $serviceVip, $extPort, $intPort, $proto) -counterName "Matched packets")
+                            $pod.NetworkMetrics["DROPPED_CONNECTIONS_EXTERNALTOSERVICE_TOTAL"] += [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex ("LB_\w*_{0}_{1}_{2}_{3}" -f $serviceVip, $extPort, $intPort, $proto) -counterName "Dropped packets")
+                            $pod.NetworkMetrics["PENDING_CONNECTIONS_EXTERNALTOSERVICE_TOTAL"] += [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex ("LB_\w*_{0}_{1}_{2}_{3}" -f $serviceVip, $extPort, $intPort, $proto) -counterName "Pending packets")
+                            $layer = "SLB_LB_LAYER"
+                            $group = "SLB_GROUP_LB_IPv4_OUT"
+                            $vfpRule = GetRule -port $portId -layer $layer -group $group
+                            $pod.NetworkMetrics["CONNECTIONS_EXTERNALTOSERVICE_TOTAL"] += [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex ("LB_\w*_{0}_{1}_{2}_{3}" -f $serviceVip, $extPort, $intPort, $proto) -counterName "Matched packets")
+                            $pod.NetworkMetrics["DROPPED_CONNECTIONS_EXTERNALTOSERVICE_TOTAL"] += [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex ("LB_\w*_{0}_{1}_{2}_{3}" -f $serviceVip, $extPort, $intPort, $proto) -counterName "Dropped packets")
+                            $pod.NetworkMetrics["PENDING_CONNECTIONS_EXTERNALTOSERVICE_TOTAL"] += [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex ("LB_\w*_{0}_{1}_{2}_{3}" -f $serviceVip, $extPort, $intPort, $proto) -counterName "Pending packets")
+                        } else {
+                            $vfpRule = GetRule -port $portId -layer $layer -group $group
+                            $pod.NetworkMetrics["CONNECTIONS_EXTERNALTOSERVICE_TOTAL"] += [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex ("LB_\w*_{0}_{1}_{2}_{3}_{4}" -f $pod.IPAddress, $serviceVip, $extPort, $intPort, $proto) -counterName "Matched packets")
+                            $pod.NetworkMetrics["DROPPED_CONNECTIONS_EXTERNALTOSERVICE_TOTAL"] += [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex ("LB_\w*_{0}_{1}_{2}_{3}_{4}" -f  $pod.IPAddress, $serviceVip, $extPort, $intPort, $proto) -counterName "Dropped packets")
+                            $pod.NetworkMetrics["PENDING_CONNECTIONS_EXTERNALTOSERVICE_TOTAL"] += [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex ("LB_\w*_{0}_{1}_{2}_{3}_{4}" -f $pod.IPAddress, $serviceVip, $extPort, $intPort, $proto) -counterName "Pending packets")
+                        }
+                      }
+                    }
+                } else {
+                    if($ExternalToService) {
+                      foreach($svc in $pod.AssociatedServices) {
+                        $serviceVip = $svc.ServiceVip
+                        $extPort = $svc.ExternalPort
+                        $intPort = $svc.InternalPort
+                        $proto = $svc.Protocol
+                        $isEtpLocal = $svc.IsETPLocal
+                        #Write-Log "Pod Port: "$portId"`n"
+
+                        $vfpRule = GetRule -port $portId -layer "LB_DSR" -group "LB_DSR_IPv4_OUT"
+                        $pod.NetworkMetrics["TCP_CONNECTIONS_PODTOEXTERNAL_TOTAL"] = [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex ("\w*{0}_{1}_6" -f $extPort, $intPort) -counterName "Matched packets")
+                        $pod.NetworkMetrics["UDP_CONNECTIONS_PODTOEXTERNAL_TOTAL"] = [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex ("\w*{0}_{1}_17" -f $extPort, $intPort) -counterName "Matched packets")
+
+                        $pod.NetworkMetrics["DROPPED_TCP_CONNECTIONS_PODTOEXTERNAL_TOTAL"] = [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex ("\w*{0}_{1}_6" -f $extPort, $intPort) -counterName "Dropped packets")
+                        $pod.NetworkMetrics["DROPPED_UDP_CONNECTIONS_PODTOEXTERNAL_TOTAL"] = [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex ("\w*{0}_{1}_17" -f $extPort, $intPort) -counterName "Dropped packets")
+
+                        $pod.NetworkMetrics["PENDING_TCP_CONNECTIONS_PODTOEXTERNAL_TOTAL"] = [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex ("\w*{0}_{1}_6" -f  $extPort, $intPort) -counterName "Pending packets")
+                        $pod.NetworkMetrics["PENDING_UDP_CONNECTIONS_PODTOEXTERNAL_TOTAL"] = [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex ("\w*{0}_{1}_17" -f $extPort, $intPort) -counterName "Pending packets")
+                      }
+                    }
+
+                    $vfpRule = GetRule -port $portId -layer "SLB_NAT_LAYER" -group "SLB_GROUP_NAT_IPv4_OUT"
+                    $pod.NetworkMetrics["TCP_CONNECTIONS_PODTOEXTERNAL_TOTAL"] += [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex "SNAT_TCP_OUTBOUNDNAT_\w*" -counterName "Matched packets")
+                    $pod.NetworkMetrics["UDP_CONNECTIONS_PODTOEXTERNAL_TOTAL"] += [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex "SNAT_UDP_OUTBOUNDNAT_\w*" -counterName "Matched packets")
+
+                    $pod.NetworkMetrics["DROPPED_TCP_CONNECTIONS_PODTOEXTERNAL_TOTAL"] += [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex "SNAT_TCP_OUTBOUNDNAT_\w*" -counterName "Dropped packets")
+                    $pod.NetworkMetrics["DROPPED_UDP_CONNECTIONS_PODTOEXTERNAL_TOTAL"] += [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex "SNAT_UDP_OUTBOUNDNAT_\w*" -counterName "Dropped packets")
+
+                    $pod.NetworkMetrics["PENDING_TCP_CONNECTIONS_PODTOEXTERNAL_TOTAL"] += [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex "SNAT_TCP_OUTBOUNDNAT_\w*" -counterName "Pending packets")
+                    $pod.NetworkMetrics["PENDING_UDP_CONNECTIONS_PODTOEXTERNAL_TOTAL"] += [int] (MatchRuleCounter -vfpRuleOutput $vfpRule -ruleRegex "SNAT_UDP_OUTBOUNDNAT_\w*" -counterName "Pending packets")
+                }
+            }
+
+            function PrintMetrics(
+                [Node] $node
+            )
+            {
+                    $message = "{0}; {1}; {2}; {3};" -f (Get-Date).ToString(), $node.Name, $pod.Name, $pod.IpAddress
+                    $portGuid= (vfpctrl.exe /list-vmswitch-port | Select-String -Pattern "Container NIC" -Context 1,0 | Out-String).split(">")[0].split(":")[1].trim();
+                    #$changeUniTtl= (vfpctrl.exe /port $portGuid /set-port-flow-settings "240 15 240 240 1400 1000 2000 1 1 0 1 1 1 0 0 0 100000 0 0 0 0 1 50 1 0 0 0 10000 1");
+                    $output = vfpctrl.exe /port $portGuid /get-rule-counter | sls "Dropped Packets"
+                    #Write-Log "$message`n $changeUniTtl" 
+
+                    $message = "{0}; {1}; {2}; {3};" -f (Get-Date).ToString(), $node.Name, $pod.Name, $pod.IpAddress
+                    Write-Log "$message | $output`n" 
+            }
+
+
+            function PrintPodMetrics(
+                [Pod] $pod
+            )
+            {
+                    $node = $(hostname)
+                    $metricMsg = ""
+                    $message = "{0}; {1}; {2}; {3};count={4};" -f (Get-Date).ToString(), $node.Name, $pod.Name, $pod.IpAddress, $pod.NetworkMetrics.Keys.Count
+                    foreach ($metricName in $pod.NetworkMetrics.Keys)
+                    {
+                        $metricValue = $pod.NetworkMetrics[$metricName]
+                        $metricFValue = "{0}:{1}, " -f $metricName, $metricValue   
+                        $metricMsg = $metricMsg + $metricFValue 
+                    }
+                    Write-Log "$message`n" 
+                    Write-Log "$metricMsg`n" 
+            }
+
+            function isPodNamePresent {
+                param (
+                    [Parameter(Mandatory=$True)][string] $podName
+                )
+
+                foreach($podPrefix in $PodNamePrefixes) {
+                    if($podName.StartsWith($podPrefix,'CurrentCultureIgnoreCase')) {
+                        return $True
+                    }
+                }
+
+                return $false
+            }
+
+            function LogNetworkMetrics ()
+            {   
+                $node = [Node]::new()
+                $node.Name = $(hostname)
+                $hnsEndpoints = Get-HnsEndpoint
+                $podsInfo = crictl pods -o json
+                foreach ($endpoint in $hnsEndpoints) {
+                    $isremoteEndpoint = ($endpoint.IsRemoteEndpoint -eq $true)
+                    if ($isremoteEndpoint -ne $true) {
+                        $endpointPortResource = $endpoint.Resources.Allocators | Where-Object Tag -eq "Endpoint Port"
+                        $currPortId = $endpointPortResource.EndpointPortGuid
+                        $podName = GetPODName -containerIdentifiers $endpoint.SharedContainers -PodsInfo $podsInfo
+                        if ($PodNamePrefixes.Length -ne 0 -and !(isPodNamePresent -podName $podName)) {
+                            continue
+                        }
+                        $pod = [Pod]::new()
+                        $pod.Name = $podName
+                        $pod.VfpPortGuid = $currPortId
+                        $pod.EndpointId = $endpoint.ID
+                        $pod.IPAddress = $endpoint.IPAddress
+                        $node.Pods += $pod
+                    }
+                }
+
+                if ($ExternalToService) {
+                  $hostportExtService = @()
+                  $loadBalancers = Get-HnsPolicyList
+                  foreach($pod in $node.Pods) {
+                    $extServiceCluster = $loadBalancers | Select Policies,References | where {$_.Policies.IsDsr -ne $true -and $_.Policies.IsVipExternalIp -eq $true -and $_.Policies.LocalRoutedVip -ne $true} 
+                    if ($extServiceCluster) {
+                      $extServiceClusterEps =  $loadBalancers | Select Policies,References | where {$_.Policies.IsDsr -ne $true -and $_.Policies.IsVipExternalIp -eq $true -and $_.Policies.LocalRoutedVip -ne $true} | Select References
+                      $extServiceClusterPolicies =  $loadBalancers | Select Policies,References | where {$_.Policies.IsDsr -ne $true -and $_.Policies.IsVipExternalIp -eq $true -and $_.Policies.LocalRoutedVip -ne $true} | Select Policies 
+                      if ($extServiceClusterEps.Count -ne $extServiceClusterPolicies.Count) { Write-Log "Failed to fetch info: Service with ETP CLuster"  }
+                      foreach($lb in $extServiceClusterPolicies) {
+                        $epStr = $extServiceClusterEps.References | Out-String
+                        if ($pod.EndpointId -eq "" -or (-not $epStr.Contains(($pod.EndpointId | out-string).ToLower()))) {
+                            continue 
+                        }
+                        $extService = [Service]::new()
+                        $extService.ServiceVip = $lb.Policies.VIPs
+                        $extService.InternalPort = $lb.Policies.InternalPort
+                        $extService.ExternalPort = $lb.Policies.ExternalPort
+                        $extService.Protocol = $lb.Policies.Protocol
+                        $extService.IsETPLocal = $false
+                        #Write-Log "Cluster LoadBalancers: "$extService.ExternalPort"_"$extService.InternalPort"`n"
+                        $pod.AssociatedServices += $extService
+                      }
+                    }
+                    $extServiceLocal = $loadBalancers | Select-Object Policies,References | where {$_.Policies.IsDsr -eq $true -and $_.Policies.IsVipExternalIp -eq $true -and $_.Policies.LocalRoutedVip -ne $true}
+                    if ($extServiceLocal) {
+                      $extServiceLocalEps = $loadBalancers | Select-Object Policies,References | where {$_.Policies.IsDsr -eq $true -and $_.Policies.IsVipExternalIp -eq $true -and $_.Policies.LocalRoutedVip -ne $true} | Select References
+                      $extServiceLocalPolicies = $loadBalancers | Select-Object Policies,References | where {$_.Policies.IsDsr -eq $true -and $_.Policies.IsVipExternalIp -eq $true -and $_.Policies.LocalRoutedVip -ne $true} | Select Policies
+                      if ($extServiceLocalEps.Count -ne $extServiceLocalPolicies.Count) { Write-Log "Failed to fetch info: Service with ETP Local"  }
+                      foreach($lb in $extServiceLocalPolicies) {
+                        $epStr = $extServiceLocalEps.References | Out-String
+                        if ($pod.EndpointId -eq "" -or (-not $epStr.Contains(($pod.EndpointId | out-string).ToLower()))) {
+                            continue 
+                        }
+                        $extService = [Service]::new()
+                        $extService.ServiceVip = $lb.Policies.VIPs
+                        $extService.InternalPort = $lb.Policies.InternalPort
+                        $extService.ExternalPort = $lb.Policies.ExternalPort
+                        $extService.Protocol = $lb.Policies.Protocol
+                        $extService.IsETPLocal = $true
+                        #Write-Log "Local LoadBalancers: "$extService.ExternalPort"_"$extService.InternalPort"`n"
+                        $pod.AssociatedServices += $extService
+                      }
+                    }
+                    $hostportExtService = $pod.AssociatedServices # Assumes all pods matching the podprefix back same set of services
+                  }
+
+                  $pod = [Pod]::new()
+                  $pod.Name = $node.Name+"_HostPort"
+                  $pod.VfpPortGuid = GetHostPortGuid
+                  $pod.EndpointId = ""
+                  $pod.IPAddress = GetManagementIP
+                  $pod.AssociatedServices += $hostportExtService
+                  $node.Pods += $pod
+                }
+
+                foreach($pod in $node.Pods) {
+                  PopulatePodMetrics -pod $pod
+                  PrintPodMetrics -pod $pod
+                }
+                
+            }
+
+            while (1) {
+                # Setup logging to .txt file in hnslogs directory
+                mkdir $LogDirectory -ErrorAction SilentlyContinue
+                cd $LogDirectory
+                Out-File $FileName
+                LogNetworkMetrics
+                Sleep $TimeIntervalInSeconds
+            }

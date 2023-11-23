@@ -1,0 +1,8 @@
+{
+    "metadata": {
+        "name": "{{CONTAINER_NAME}}"
+    },
+    "image": {
+        "image": "{{IMAGE}}"
+    }
+}
