@@ -14,7 +14,7 @@ Will schedule packetcapture DaemonSet pods onto every Windows node into namespac
 If you have containerD v1.6.18 or higher, you can also apply `capturepacketdrops.yaml` on either Windows Server 2022 or Windows Server 2019.
 
 ## Parameters
-`pktmon start -t -p Microsoft-Windows-Hyper-V-VfpExt -k 0x0000000000000002 -m multi-file -f packetcapture.etl -s 256;`
+`pktmon start -c --comp all --type drop -t -p Microsoft-Windows-Hyper-V-VfpExt -k 0x0000000000000002 -m multi-file -f packetcapture.etl -s 256;`
 
 This runs Pktmon trace filtering with keyword 'Guard' (used for filtering dropped packets) for Microsoft-Windows-Hyper-V-VfpExt provider.
 
