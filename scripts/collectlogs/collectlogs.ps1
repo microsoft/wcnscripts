@@ -19,15 +19,15 @@ md $BaseDir -ErrorAction Ignore
 $helper = "$BaseDir\helper.psm1"
 if (!(Test-Path $helper))
 {
-    Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/$GithubSDNRepository/master/scripts/helper/helper.psm1" -OutFile $BaseDir\helper.psm1
+    Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/$GithubSDNRepository/main/scripts/helper/helper.psm1" -OutFile $BaseDir\helper.psm1
 }
 ipmo $helper -Function DownloadFile
 
-DownloadFile -Url  "https://raw.githubusercontent.com/$GithubSDNRepository/master/scripts/helper/dumpVfpPolicies.ps1" -Destination $BaseDir\dumpVfpPolicies.ps1
-DownloadFile -Url "https://raw.githubusercontent.com/$GithubSDNRepository/master/scripts/helper/hns.v2.psm1" -Destination $BaseDir\hns.v2.psm1
-DownloadFile -Url "https://raw.githubusercontent.com/$GithubSDNRepository/master/scripts/starthnstrace/starthnstrace.ps1" -Destination $BaseDir\starthnstrace.ps1
-DownloadFile -Url "https://raw.githubusercontent.com/$GithubSDNRepository/master/scripts/startpacketcapture/startpacketcapture.ps1" -Destination $BaseDir\startpacketcapture.ps1
-DownloadFile -Url  "https://raw.githubusercontent.com/$GithubSDNRepository/master/Kubernetes/scripts/portReservationTest/portReservationTest.ps1" -Destination $BaseDir\portReservationTest.ps1
+DownloadFile -Url  "https://raw.githubusercontent.com/$GithubSDNRepository/main/scripts/helper/dumpVfpPolicies.ps1" -Destination $BaseDir\dumpVfpPolicies.ps1
+DownloadFile -Url "https://raw.githubusercontent.com/$GithubSDNRepository/main/scripts/HNS/hns.v2.psm1" -Destination $BaseDir\hns.v2.psm1
+DownloadFile -Url "https://raw.githubusercontent.com/$GithubSDNRepository/main/scripts/starthnstrace/starthnstrace.ps1" -Destination $BaseDir\starthnstrace.ps1
+DownloadFile -Url "https://raw.githubusercontent.com/$GithubSDNRepository/main/scripts/startpacketcapture/startpacketcapture.ps1" -Destination $BaseDir\startpacketcapture.ps1
+DownloadFile -Url  "https://raw.githubusercontent.com/$GithubSDNRepository/main/scripts/portReservationTest/portReservationTest.ps1" -Destination $BaseDir\portReservationTest.ps1
 
 ipmo $BaseDir\hns.v2.psm1 -Force
 
