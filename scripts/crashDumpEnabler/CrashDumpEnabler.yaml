@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: crash-dump-enabler
+  labels:
+    app: crash-dump-enabler
+spec:
+  selector:
+    matchLabels:
+      name: crash-dump-enabler
+  template:
+    metadata:
+      labels:
+        name: crash-dump-enabler
+    spec:
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\SYSTEM"
+      hostNetwork: true
+      containers:
+      - name: crash-dump-enabler
+        image: mcr.microsoft.com/windows/nanoserver:ltsc2022
+        args:
+        - powershell.exe
+        - -Command
+        - |
+            $crashDumpsPath = "C:\k\debug\LocalDumps"
+            mkdir $crashDumpsPath -Force
+
+            # Prepare ACL properties
+            $FileSystemRights = "Read"
+            $AccessControlType = "Allow"
+            $IdentityReference = "BUILTIN\Users"
+
+            # Add ACL properties to a FileSystemAccessRule object
+            $fileSystemAccessRuleArgumentList = $IdentityReference, $FileSystemRights, $AccessControlType
+            $fileSystemAccessRule = New-Object -TypeName System.Security.AccessControl.FileSystemAccessRule -ArgumentList $fileSystemAccessRuleArgumentList
+
+            # We modify current ACL on crashDumpsPath folder to allow AKS-Periscope to copy it to remote storage account.
+            $newAcl = Get-Acl -Path $crashDumpsPath
+            # Apply modified rule to crashDumpsPath
+            $newAcl.AddAccessRule($fileSystemAccessRule)
+            Set-Acl -Path $crashDumpsPath -AclObject $newAcl
+
+            Reg add "HKLM\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps" /V DumpCount /t REG_DWORD /d 50 /f
+            Reg add "HKLM\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps" /V DumpType /t REG_DWORD /d 2 /f
+            Reg add "HKLM\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps" /V DumpFolder /t REG_EXPAND_SZ /d $crashDumpsPath /f
+
+            $(Hostname) + " :" + "Dump collection Enabled, registry output below:"
+            reg query "HKLM\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps"
+
+            While ($true) {
+              Start-Sleep -Seconds 600
+            }
+
+        imagePullPolicy: IfNotPresent
+      nodeSelector:
+        kubernetes.azure.com/os-sku: Windows2022
