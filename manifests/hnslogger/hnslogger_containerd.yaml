@@ -1,13 +1,13 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: cosmic-infra-agents
+  name: wcn-debug
 ---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: hnslogger
-  namespace: cosmic-infra-agents
+  namespace: wcn-debug
   labels:
     app: hnslogger
 spec:
