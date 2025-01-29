@@ -28,38 +28,9 @@ spec:
       - name: capturepacketdrop
         image: mcr.microsoft.com/windows/nanoserver:ltsc2022
         command:
-        - powershell.exe
-        - -Command
-        - | 
-            $LogDirectory = "c:\k\debug\wcnlogs\"
-            mkdir $LogDirectory -ErrorAction SilentlyContinue
-            cd $LogDirectory
-            
-            function rotateLogs {
-              $MaxLogFileCount = 40      # Maximum number of log files to keep
-
-              # Get the list of log files in the directory
-              $LogFiles = Get-ChildItem -Path $LogDirectory -Filter "packetcapture*.etl" | Sort-Object -Property LastWriteTime
-
-              # Check if the number of log files exceeds the maximum allowed
-              if ($LogFiles.Count -gt $MaxLogFileCount) {
-                  # Determine how many files to delete
-                  $FilesToDeleteCount = $LogFiles.Count - $MaxLogFileCount
-
-                  # Delete the oldest log files until the count is within the limit
-                  $FilesToDelete = $LogFiles | Select-Object -First $FilesToDeleteCount
-                  $FilesToDelete | ForEach-Object {
-                      Write-Host "Deleting log file: $($_.Name)"
-                      Remove-Item -Path $_.FullName -Force
-                  }
-              }
-            }
-            # Begin pktmon (Keyword - 'Guard' 0x0000000000000002)
-            pktmon start -c --comp all --type drop -t -p Microsoft-Windows-Hyper-V-VfpExt -k 0x0000000000000002 -m multi-file -f packetcapture.etl -s 256;
-            while(1) {
-              sleep 1200
-              rotateLogs
-              }
+          - powershell.exe
+          - -Command
+          - '$LogDirectory="c:\k\debug\wcnlogs\"; mkdir $LogDirectory -ErrorAction SilentlyContinue; cd $LogDirectory; function rotateLogs { $MaxLogFileCount=40; $LogFiles=Get-ChildItem -Path $LogDirectory -Filter "packetcapture*.etl" | Sort-Object -Property LastWriteTime; if ($LogFiles.Count -gt $MaxLogFileCount) { $FilesToDeleteCount=$LogFiles.Count-$MaxLogFileCount; $FilesToDelete=$LogFiles | Select-Object -First $FilesToDeleteCount; $FilesToDelete | ForEach-Object { Write-Host "Deleting log file: $($_.Name)"; Remove-Item -Path $_.FullName -Force } } }; pktmon list -a -i --json > "Pktmon-Components.txt"; pktmon filter add -d IPv4; pktmon start -c --comp all --type drop -t -p Microsoft-Windows-Hyper-V-VfpExt -k 0x0000000000000002 -m multi-file -f packetcapture.etl -s 256; while(1){sleep 1200; rotateLogs }'
         imagePullPolicy: IfNotPresent
         volumeMounts:
           - name: kube-path
@@ -68,9 +39,9 @@ spec:
           preStop:
             exec:
               command:
-              - powershell.exe
-              - -Command
-              - "pktmon stop;sleep 20"
+                - powershell.exe
+                - -Command
+                - "pktmon stop; pktmon filter remove; sleep 20"
       terminationGracePeriodSeconds: 60
       volumes:
       - name: kube-path
