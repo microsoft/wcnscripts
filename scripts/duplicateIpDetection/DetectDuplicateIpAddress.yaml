@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: detect-dup-ip
+  labels:
+    app: detect-dup-ip
+spec:
+  selector:
+    matchLabels:
+      name: detect-dup-ip
+  template:
+    metadata:
+      labels:
+        name: detect-dup-ip
+    spec:
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\SYSTEM"
+      hostNetwork: true
+      containers:
+      - name: detect-dup-ip
+        image: mcr.microsoft.com/dotnet/framework/samples:aspnetapp
+        command:
+        - powershell.exe
+        - -command
+        - "& 'C:\\k\\debug\\DetectDuplicateIpAddrs.ps1'"
+        securityContext:
+          privileged: true
+      nodeSelector:
+        kubernetes.azure.com/os-sku: Windows2022
