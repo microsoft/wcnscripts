@@ -24,25 +24,7 @@ spec:
         command:
         - powershell.exe
         - -command
-        - |
-            Write-Host "Detecting duplicate IP addresses on the host..."
-
-            $BaseDir = "c:\k\debug"
-            ipmo $BaseDir\hns.v2.psm1 -Force
-
-            while($true){
-                $ipAddresses = ((Get-HnsEndpoint).IpConfigurations).IpAddress
-                $duplicateIpAddr = $ipAddresses | Group-Object | Where-Object { $_.Count -gt 1 }
-
-                if($duplicateIpAddr.Count -gt 0){
-                    break
-                }
-
-                Start-Sleep -Seconds 300
-            }
-
-            Write-Host "Duplicate IP addresses found on the host, collecting windows logs..."
-            & "$BaseDir\collect-windows-logs.ps1"
+        - '$BaseDir = "c:\k\debug"; Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/microsoft/wcnscripts/refs/heads/user/rishusingh/duplicateIPdetection/scripts/duplicateIpDetection/DetectDuplicateIpAddr.ps1" -OutFile $BaseDir\DetectDuplicateIpAddr.ps1 | Write-Host; cd $BaseDir; .\DetectDuplicateIpAddr.ps1'
         securityContext:
           privileged: true
       nodeSelector:
