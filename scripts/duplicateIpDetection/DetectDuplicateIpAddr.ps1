@@ -21,10 +21,16 @@ while($true){
         break
     }
 
-    Start-Sleep -Seconds 30
+    Start-Sleep -Seconds 300
 }
 
-Write-Host "Duplicate IP addresses found on the node, collecting windows logs..."
+Write-Host "Duplicate IP addresses found on the node, Duplicate IP addresses are:"
+
+foreach($ip in $duplicateIpAddr){
+    Write-Host $ip
+}
+
+Write-Host "Collecting Windows logs..."
 $collectWindowsLogs = "$BaseDir\collect-windows-logs.ps1" 
 powershell $collectWindowsLogs | Write-Host
 
