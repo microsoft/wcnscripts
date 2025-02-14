@@ -6,8 +6,6 @@ Write-Host "Trying to load HNS module..."
 
 ipmo $BaseDir\hns.v2.psm1 -Force | Write-Host
 
-$testIndex = 0
-
 while($true){
     $ipAddresses = ((Get-HnsEndpoint).IpConfigurations).IpAddress
 
@@ -19,11 +17,9 @@ while($true){
     Write-Host "Checking for duplicate IP addresses inside the loop..."
     $duplicateIpAddr = $ipAddresses | Group-Object | Where-Object { $_.Count -gt 1 }
 
-    if($duplicateIpAddr.Count -gt 0 -or $testIndex -eq 5){
+    if($duplicateIpAddr.Count -gt 0){
         break
     }
-
-    $testIndex = $testIndex + 1
 
     Start-Sleep -Seconds 30
 }
