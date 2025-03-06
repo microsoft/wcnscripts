@@ -15,18 +15,7 @@ Write-Host "Starting pktmon with trace level 6 for HNS"
 pktmon start --capture --comp all --trace -p Microsoft-Windows-Host-Network-Service -l 6 -f traces.etl --pkt-size 100 -s 1024
 
 while($true){
-    $ipAddresses = @(
-    "192.168.1.1",
-    "192.168.1.2",
-    "192.168.1.4",
-    "192.168.1.4",
-    "192.168.1.5",
-    "192.168.1.5",
-    "192.168.1.7",
-    "192.168.1.8",
-    "192.168.1.9",
-    "192.168.1.10"
-)#((Get-HnsEndpoint).IpConfigurations).IpAddress
+    $ipAddresses = ((Get-HnsEndpoint).IpConfigurations).IpAddress
 
     Write-Host "IP addresses on the node:"
     foreach($ip in $ipAddresses){
