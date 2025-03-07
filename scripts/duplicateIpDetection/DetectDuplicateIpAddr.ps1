@@ -12,7 +12,7 @@ pktmon stop # Stopping if pktmon is already running
 
 # Start pktmon
 Write-Host "Starting pktmon with trace level 6 for HNS"
-pktmon start --trace -p Microsoft-Windows-Host-Network-Service -l 6 -f traces.etl -s 1024
+pktmon start --trace -p Microsoft-Windows-Host-Network-Service -l 6 -f traces.etl -s 2048
 
 while($true){
     $ipAddresses = ((Get-HnsEndpoint).IpConfigurations).IpAddress
