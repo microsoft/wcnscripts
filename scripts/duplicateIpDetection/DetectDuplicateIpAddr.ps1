@@ -31,7 +31,7 @@ while($true){
 
     $iter++
 
-    Start-Sleep -Seconds 180
+    Start-Sleep -Seconds 60
 }
 
 Write-Host "Duplicate IP addresses found on the node, Duplicate IP addresses are:"
