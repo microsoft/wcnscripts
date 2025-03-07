@@ -17,11 +17,6 @@ pktmon start --trace -p Microsoft-Windows-Host-Network-Service -l 6 -f traces.et
 while($true){
     $ipAddresses = ((Get-HnsEndpoint).IpConfigurations).IpAddress
 
-    Write-Host "IP addresses on the node:"
-    foreach($ip in $ipAddresses){
-        Write-Host $ip
-    }
-
     Write-Host "Checking for duplicate IP addresses inside the loop..."
     $duplicateIpAddr = $ipAddresses | Group-Object | Where-Object { $_.Count -gt 1 }
 
