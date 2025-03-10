@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: invalidcompartment
+  labels:
+    app: invalidcompartment
+spec:
+  selector:
+    matchLabels:
+      name: invalidcompartment
+  template:
+    metadata:
+      labels:
+        name: invalidcompartment
+    spec:
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\SYSTEM"
+      hostNetwork: true
+      containers:
+      - name: invalidcompartment
+        image: mcr.microsoft.com/dotnet/framework/samples:aspnetapp
+        command:
+        - powershell.exe
+        - -command
+        - |
+            function Is-CompartmentIdValid { Write-Host "#===== Validating Compartment ID in Endpoint and Namespace =====#"; Write-Host ""; $eps = Get-HnsEndpoint; $nss = Get-HnsNamespace; $compsNotMatching = @(); foreach ($ep in $eps) { if ($ep.Resources.Allocators.CompartmendId.Length -gt 0) { $compId = [int]$($ep.Resources.Allocators.CompartmendId[0]); $nsId = $ep.Namespace.ID; foreach ($ns in $nss) { if ($ns.ID -Eq $nsId) { Write-Host "IP Address : $($ep.IPAddress), NamespaceID: $nsId, EPCompID : $compId, NSCompID: $($ns.CompartmentId)"; if ($ns.CompartmentId -NE $compId) { Write-Host "CompartmentId not matching..."; $compsNotMatching += $ep.IPAddress } else { Write-Host "CompartmentId matching..." } } } } } if ($compsNotMatching.Length -gt 0) { Write-Host "CompartmentId not matching for the following IPs: $($compsNotMatching -join ', ')" -ForegroundColor Red ; return $false } return $true; }; $iter = 1; $curLoc = (Get-Location).Path; pktmon stop; Write-Host "#===== Starting pktmon with trace level 6 for TCPIP and Host-Network-Service =====#"; pktmon start --trace -p Microsoft-Windows-TCPIP -k 0xFF -l 6 -p Microsoft-Windows-Host-Network-Service -l 6 -f traces.etl -s 2048; while (Is-CompartmentIdValid) { $d = Get-Date; Write-Host "#===== Iteration: $iter completed at $d. No issue found. Waiting for 1 minute for next iteration. =====#"; Write-Host ""; Start-Sleep -Seconds 60; $iter++ }; Write-Host "#===== Issue detected. Waiting for 1 minute before stopping pktmon and collecting logs. =====#"; Start-Sleep -Seconds 60; Write-Host ""; pktmon stop; C:\k\debug\collect-windows-logs.ps1; Write-Host "Traces available in $curLoc\traces.etl"; while ($true) { if ($iter -Eq 1) { Write-Host "The issue was detected on a previously corrupted node, and log rotation may have occurred." } else { Write-Host "Issue detected. Please download and review the collected Windows logs and also traces from the following path: $curLoc\traces.etl" }; Start-Sleep -Seconds 3600 }
+
+        imagePullPolicy: IfNotPresent
+        volumeMounts:
+          - name: kube-path
+            mountPath: C:\k
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - powershell.exe
+              - -Command
+              - "pktmon stop;sleep 20"
+      volumes:
+      - name: kube-path
+        hostPath:
+          path: C:\k
+      nodeSelector:
+        kubernetes.azure.com/os-sku: Windows2022
+      tolerations:
+        - effect: NoSchedule
+          key: ipv6pilot
+          operator: Exists
