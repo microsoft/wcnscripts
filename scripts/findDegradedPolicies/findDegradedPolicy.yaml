@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: finddegradedpolicy
+  labels:
+    app: finddegradedpolicy
+spec:
+  selector:
+    matchLabels:
+      name: finddegradedpolicy
+  template:
+    metadata:
+      labels:
+        name: finddegradedpolicy
+    spec:
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\SYSTEM"
+      hostNetwork: true
+      containers:
+      - name: finddegradedpolicy
+        image: mcr.microsoft.com/dotnet/framework/samples:aspnetapp
+        command:
+        - powershell.exe
+        - -command
+        - |
+            $timeToWait=10;$degradedPoliciesNotFound=$true;Write-Host "Checking for degraded policies ...";while($degradedPoliciesNotFound){$degradedPolicies=(Get-HnsPolicyList|where State -eq 4);foreach($policy in $degradedPolicies){$policyId=$policy.ID;Write-Host "Degraded policy found: $policyId";$errorCount=(Get-Content C:\k\kubeproxy.err.log|sls "The endpoint was not found"|sls $policyId).Count;if($errorCount -eq 0){Write-Host "No errors found for policy $policyId in kubeproxy.err.log" -ForegroundColor Green;continue}else{Write-Host "Errors found for policy $policyId in kubeproxy.err.log: $errorCount" -ForegroundColor Red};$refEPS=$policy.References;foreach($refEP in $refEPS){$epIdArray=$refEP.Split("/");if($epIdArray.Count -eq 3){$epId=$epIdArray[2];$ep=Get-HnsEndpoint|where ID -eq $epId;if($ep -eq $null){Write-Host "Invalid endpoint found: $epId" -ForegroundColor Red;$degradedPoliciesNotFound=$false}}}};if($degradedPoliciesNotFound){Write-Host "No degraded policies with invalid endpoints found. Waiting for $timeToWait seconds before checking again." -ForegroundColor Yellow;Start-Sleep -Seconds $timeToWait}else{Write-Host "Degraded policies and corresponding invalid endpoints found." -ForegroundColor Red}};$svcMap=@{};$entries=(Get-Content C:\k\kubeproxy.err.log|sls "hcnCreateLoadBalancer failed in Win32" -Context 1,0|findstr serviceName);if($entries.Count -gt 0){foreach($entry in $entries){$svc=($entry -split "serviceName=")[1];if($svcMap.ContainsKey($svc)){$svcMap[$svc]+=1}else{$svcMap[$svc]=1}}}else{Write-Host "No entries found in kubeproxy.err.log indicating hcnCreateLoadBalancer failure." -ForegroundColor Green};foreach($svc in $svcMap.Keys){Write-Host "Service $svc has $($svcMap[$svc]) hcnCreateLoadBalancer failures." -ForegroundColor Yellow};while($true){Start-Sleep -Seconds 300}
+
+
+        imagePullPolicy: IfNotPresent
+        volumeMounts:
+          - name: kube-path
+            mountPath: C:\k
+      volumes:
+      - name: kube-path
+        hostPath:
+          path: C:\k
+      nodeSelector:
+        kubernetes.azure.com/os-sku: Windows2022
+      tolerations:
+        - effect: NoSchedule
+          key: ipv6pilot
+          operator: Exists
