@@ -124,16 +124,6 @@ data:
         return $dips
     }
 
-    $regKeyVal = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Policies\Microsoft\FeatureManagement\Overrides" -Name 140377743).140377743
-    if ($regKeyVal -eq 1) {
-        Write-Host "##========== Registry keys are not zero. Setting reg key to 0 and restarting the node." -ForegroundColor Yellow
-        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Policies\Microsoft\FeatureManagement\Overrides" -Name 140377743 -Value 0 -Type DWORD
-        Restart-Computer -Force
-        Start-Sleep -Seconds 30
-    } else {
-        Write-Host "##========== Registry keys are zero. Continuing the script." -ForegroundColor Green
-    }
-
     While($true) {
         Write-Host "##========== Waiting for $refreshIntervalSeconds seconds for the next iteration..." -ForegroundColor Cyan
         Start-Sleep -Seconds $refreshIntervalSeconds
