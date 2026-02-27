@@ -1,0 +1,195 @@
+function Write-KustoLog {
+    param(
+        [string]$Level,
+        [string]$Event,
+        [string]$Message,
+        [hashtable]$Properties = @{}
+    )
+    $log = [ordered]@{
+        Timestamp  = (Get-Date -Format 'o')
+        Level      = $Level
+        Event      = $Event
+        Message    = $Message
+        Computer   = $env:COMPUTERNAME
+    }
+    foreach ($k in $Properties.Keys) {
+        $log[$k] = $Properties[$k]
+    }
+    $log | ConvertTo-Json -Compress | Write-Output
+}
+
+$nw = Get-HnsNetwork | Where Name -Eq azure
+$nodeIpv4 = $nw.ManagementIP
+$nodeIpv6 = $nw.ManagementIPv6
+
+Write-KustoLog -Level 'Info' -Event 'ScriptStarted' -Message 'Cleanup orphan rules script started.' -Properties @{
+    NodeIPv4 = $nodeIpv4
+    NodeIPv6 = $nodeIpv6
+}
+
+
+function Get-ExpectedVfpRuleIds {
+    param(
+        [string]$nodeIPv4,
+        [string]$nodeIPv6,
+        [array]$hnsPolicies
+    )
+
+    $expVfpRuleIds = @{}
+
+    foreach ($policy in $hnsPolicies) {
+        $pol = $policy.Policies[0]
+        $alloc = $policy.Resources.Allocators[0]
+
+        # Skip non-DSR policies
+        if (-not $alloc.IsDSR) { continue }
+
+        $extPort  = $pol.ExternalPort
+        $intPort  = $pol.InternalPort
+        $protocol = $pol.Protocol
+        $idPrefix = $alloc.ID.Substring(0,5).ToUpper()
+
+        # Determine nodeIP based on IPv6 flag
+        if ($pol.IPv6 -or $alloc.IsIpv6) {
+            if (-not $nodeIPv6) { continue }
+            $nodeIP = $nodeIPv6
+        } else {
+            $nodeIP = $nodeIPv4
+        }
+
+        # VIP: use VIPs[0] if present, otherwise nodeIP
+        if ($pol.VIPs -and $pol.VIPs.Count -gt 0) {
+            $vip = $pol.VIPs[0]
+        } else {
+            $vip = $nodeIP
+        }
+
+        $expVfpRuleId = "LB_DSR_${nodeIP}_${vip}_${extPort}_${intPort}_${protocol}_${idPrefix}"
+        $expVfpRuleIds[$expVfpRuleId] = $true
+    }
+
+    return $expVfpRuleIds
+}
+
+function Get-StaleVfpRuleIds {
+    param(
+        [hashtable]$expVfpRuleIds
+    )
+
+    $staleVfpRuleIds = @{}
+    $groups = @("LB_DSR_IPv4_OUT", "LB_DSR_IPv6_OUT")
+    $ports = (vfpctrl.exe /list-vmswitch-port /format 1 | ConvertFrom-Json).Ports.Name
+    foreach ($port in $ports) {
+        foreach ($group in $groups) {
+            $rules = (vfpctrl /port $port /layer LB_DSR /group $group /list-rule /format 1 | ConvertFrom-Json).Rules
+            foreach ($rule in $rules) {
+                $ruleId = $rule.Id
+                Write-Host "Checking VFP rule: Port=$port, Group=$group, RuleId=$ruleId" -ForegroundColor Gray
+                if ($expVfpRuleIds[$ruleId] -eq $null) {
+                    $key = "${port}::${ruleId}"
+                    $staleVfpRuleIds[$key] = @{
+                        Port   = $port
+                        Layer  = "LB_DSR"
+                        Group  = $group
+                        RuleId = $ruleId
+                    }
+                }
+            }
+        }
+    }
+
+    return $staleVfpRuleIds
+}
+
+function Test-VfpRuleHasMatchingPolicy {
+    param(
+        [string]$port,
+        [string]$layer,
+        [string]$group,
+        [string]$ruleId,
+        [array]$hnsPolicies
+    )
+
+    $obj = (vfpctrl /get-rule-info /port $port /layer $layer /group $group /rule $ruleId /format 1 | ConvertFrom-Json).Rules
+
+    $protocol = $obj.Conditions | Where-Object { $_.ProtocolList } | ForEach-Object { $_.ProtocolList[0] }
+
+    $destIP = $obj.Conditions | Where-Object { $_.DestinationIPv4RangeList -or $_.DestinationIPv6RangeList } | ForEach-Object {
+        if ($_.DestinationIPv4RangeList) { $_.DestinationIPv4RangeList[0].H }
+        elseif ($_.DestinationIPv6RangeList) { $_.DestinationIPv6RangeList[0].H }
+    }
+
+    $destPort = $obj.Conditions | Where-Object { $_.DestinationPortList } | ForEach-Object { $_.DestinationPortList[0] }
+
+    $found = $hnsPolicies | Where-Object {
+        $_.Policies[0].VIPs -contains $destIP -and
+        $_.Policies[0].ExternalPort -eq $destPort -and
+        $_.Policies[0].Protocol -eq $protocol
+    }
+
+    return [bool]$found
+}
+
+$iterationIntervalSeconds = if ($env:ITERATION_INTERVAL_SECONDS) { [int]$env:ITERATION_INTERVAL_SECONDS } else { 30 }
+$pass2DelaySeconds = if ($env:PASS2_DELAY_SECONDS) { [int]$env:PASS2_DELAY_SECONDS } else { 10 }
+
+Write-KustoLog -Level 'Info' -Event 'ConfigLoaded' -Message 'Configuration loaded.' -Properties @{
+    IterationIntervalSeconds = $iterationIntervalSeconds
+    Pass2DelaySeconds        = $pass2DelaySeconds
+}
+
+while ($true) {
+    $hnsPolicies = Get-HnsPolicyList
+    Write-KustoLog -Level 'Info' -Event 'Pass1Started' -Message 'First pass: collecting expected and stale VFP rule IDs.' -Properties @{ PolicyCount = $hnsPolicies.Count }
+    $expVfpRuleIdsBefore = Get-ExpectedVfpRuleIds -nodeIPv4 $nodeIpv4 -nodeIPv6 $nodeIpv6 -hnsPolicies $hnsPolicies
+    $staleVfpRuleIdsBefore = Get-StaleVfpRuleIds -expVfpRuleIds $expVfpRuleIdsBefore
+    Write-KustoLog -Level 'Info' -Event 'Pass1Completed' -Message 'First pass completed.' -Properties @{
+        ExpectedRuleCount = $expVfpRuleIdsBefore.Count
+        StaleRuleCount    = $staleVfpRuleIdsBefore.Count
+    }
+
+    Start-Sleep -Seconds $pass2DelaySeconds
+
+    $hnsPolicies = Get-HnsPolicyList
+    Write-KustoLog -Level 'Info' -Event 'Pass2Started' -Message 'Second pass: collecting expected and stale VFP rule IDs.' -Properties @{ PolicyCount = $hnsPolicies.Count }
+    $expVfpRuleIdsAfter = Get-ExpectedVfpRuleIds -nodeIPv4 $nodeIpv4 -nodeIPv6 $nodeIpv6 -hnsPolicies $hnsPolicies
+    $staleVfpRuleIdsAfter = Get-StaleVfpRuleIds -expVfpRuleIds $expVfpRuleIdsAfter
+    Write-KustoLog -Level 'Info' -Event 'Pass2Completed' -Message 'Second pass completed.' -Properties @{
+        ExpectedRuleCount = $expVfpRuleIdsAfter.Count
+        StaleRuleCount    = $staleVfpRuleIdsAfter.Count
+    }
+
+    $orphanVfpRules = @{}
+    foreach ($key in $staleVfpRuleIdsBefore.Keys) {
+        if ($staleVfpRuleIdsAfter.ContainsKey($key)) {
+            $orphanVfpRules[$key] = $staleVfpRuleIdsAfter[$key]
+        }
+    }
+
+    Write-KustoLog -Level 'Info' -Event 'OrphanDetection' -Message 'Orphan detection completed.' -Properties @{ OrphanRuleCount = $orphanVfpRules.Count }
+
+    if ($orphanVfpRules.Count -eq 0) {
+        Write-KustoLog -Level 'Info' -Event 'NoOrphanRules' -Message 'No orphan VFP rules found.'
+    } else {
+        foreach ($entry in $orphanVfpRules.Values) {
+            $ruleProps = @{
+                Port   = $entry.Port
+                Layer  = $entry.Layer
+                Group  = $entry.Group
+                RuleId = $entry.RuleId
+            }
+            Write-KustoLog -Level 'Warning' -Event 'OrphanRuleDetected' -Message "Orphan VFP rule detected." -Properties $ruleProps
+
+            if (-not (Test-VfpRuleHasMatchingPolicy -port $entry.Port -layer $entry.Layer -group $entry.Group -ruleId $entry.RuleId -hnsPolicies $hnsPolicies)) {
+                Write-KustoLog -Level 'Warning' -Event 'OrphanRuleNoPolicy' -Message "Rule has no matching HNS policy and is a candidate for removal." -Properties $ruleProps
+                # Remove the orphan rule
+                # vfpctrl.exe /port $entry.Port /layer $entry.Layer /group $entry.Group /delete-rule /rule $entry.RuleId
+            } else {
+                Write-KustoLog -Level 'Info' -Event 'OrphanRuleHasPolicy' -Message "Rule has a matching HNS policy and should not be removed." -Properties $ruleProps
+            }
+        }
+    }
+
+    Write-KustoLog -Level 'Info' -Event 'IterationCompleted' -Message "Iteration completed. Sleeping for $iterationIntervalSeconds seconds."
+    Start-Sleep -Seconds $iterationIntervalSeconds
+}
