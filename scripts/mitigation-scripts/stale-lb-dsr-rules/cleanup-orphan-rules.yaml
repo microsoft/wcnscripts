@@ -31,6 +31,8 @@ data:
         $log | ConvertTo-Json -Compress | Write-Output
     }
 
+    Import-Module -Force C:\k\hns.v2.psm1
+
     $nw = Get-HnsNetwork | Where Name -Eq azure
     $nodeIpv4 = $nw.ManagementIP
     $nodeIpv6 = $nw.ManagementIPv6
@@ -98,6 +100,11 @@ data:
                 foreach ($rule in $rules) {
                     $ruleId = $rule.Id
                     if ($expVfpRuleIds[$ruleId] -eq $null) {
+                        # Skip nodePort rules (destination port > 30000 and < 32768)
+                        $parts = $ruleId -split '_'
+                        $extPort = [int]$parts[$parts.Count - 4]
+                        if ($extPort -ge 30000 -and $extPort -lt 32768) { continue }
+
                         $key = "${port}::${ruleId}"
                         $staleVfpRuleIds[$key] = @{
                             Port   = $port
@@ -139,7 +146,10 @@ data:
             $_.Policies[0].Protocol -eq $protocol
         }
 
-        return [bool]$found
+        if ($found) {
+            return $null
+        }
+        return @{ DestIP = $destIP; DestPort = $destPort; Protocol = $protocol }
     }
 
     $iterationIntervalSeconds = if ($env:ITERATION_INTERVAL_SECONDS) { [int]$env:ITERATION_INTERVAL_SECONDS } else { 60 }
@@ -183,6 +193,8 @@ data:
         if ($orphanVfpRules.Count -eq 0) {
             Write-KustoLog -Level 'Info' -Event 'NoOrphanRules' -Message 'No orphan VFP rules found.'
         } else {
+            $hnsPolicies = Get-HnsPolicyList
+            $unmatchedPolicies = @{}
             foreach ($entry in $orphanVfpRules.Values) {
                 $ruleProps = @{
                     Port   = $entry.Port
@@ -190,15 +202,85 @@ data:
                     Group  = $entry.Group
                     RuleId = $entry.RuleId
                 }
-                Write-KustoLog -Level 'Warning' -Event 'OrphanRuleDetected' -Message "Orphan VFP rule detected." -Properties $ruleProps
 
-                if (-not (Test-VfpRuleHasMatchingPolicy -port $entry.Port -layer $entry.Layer -group $entry.Group -ruleId $entry.RuleId -hnsPolicies $hnsPolicies)) {
-                    Write-KustoLog -Level 'Warning' -Event 'OrphanRuleNoPolicy' -Message "Rule has no matching HNS policy and is a candidate for removal." -Properties $ruleProps
+                $result = Test-VfpRuleHasMatchingPolicy -port $entry.Port -layer $entry.Layer -group $entry.Group -ruleId $entry.RuleId -hnsPolicies $hnsPolicies
+                if ($result) {
+                    Write-KustoLog -Level 'Warning' -Event 'OrphanRuleDetected' -Message "Orphan VFP rule detected." -Properties $ruleProps
                     # Remove the orphan rule
-                    vfpctrl.exe /port $entry.Port /layer $entry.Layer /group $entry.Group /delete-rule /rule $entry.RuleId
-                } else {
-                    Write-KustoLog -Level 'Info' -Event 'OrphanRuleHasPolicy' -Message "Rule has a matching HNS policy and should not be removed." -Properties $ruleProps
+                    vfpctrl /remove-rule /port $entry.Port /layer $entry.Layer /group $entry.Group /rule $entry.RuleId
+                    Write-KustoLog -Level 'Info' -Event 'OrphanRuleRemoved' -Message "Orphan VFP rule removed." -Properties $ruleProps
+                    # Collect unique VIP/port/protocol for LB create+delete
+                    $ruleIdParts = $entry.RuleId -split '_'
+                    $result.IntPort = [int]$ruleIdParts[-3]
+                    $policyKey = "$($result.DestIP)::$($result.DestPort)::$($result.Protocol)"
+                    if (-not $unmatchedPolicies.ContainsKey($policyKey)) {
+                        $unmatchedPolicies[$policyKey] = $result
+                    }
                 }
+            }
+
+            # Create and delete temporary LB policies to force HNS cleanup of stale VFP rules
+            if ($unmatchedPolicies.Count -gt 0) {
+                Write-KustoLog -Level 'Info' -Event 'LBPolicyCleanup' -Message "Creating and deleting temporary LB policies to trigger cleanup." -Properties @{ UnmatchedPolicyCount = $unmatchedPolicies.Count }
+                ipmo -Force C:\k\hns.v2.psm1
+                $ipStackCount = (Get-HnsNetwork)[0].Ipams.Count
+                $epId = (Get-HnsEndpoint | Where-Object { $_.IpConfigurations.Count -ge $ipStackCount })[0].Id
+                Write-KustoLog -Level 'Info' -Event 'EndpointSelection' -Message "Endpoints selected for LB cleanup." -Properties @{
+                    EndpointId = if ($epId) { $epId } else { 'none' }
+                }
+                foreach ($policy in $unmatchedPolicies.Values) {
+                    $isIPv6 = $policy.DestIP -match ':'
+
+                    try {
+                        $VIP = $policy.DestIP
+                        $InternalPort = $policy.IntPort
+                        $ExternalPort = $policy.DestPort
+                        $Protocol     = $policy.Protocol
+
+                        if ($VIP -eq  $null -or $InternalPort -eq $null -or $ExternalPort -eq $null -or $Protocol -eq $null) {
+                            continue
+                        }
+
+                        Write-KustoLog -Level 'Info' -Event 'TempLBCreateStart' -Message "Creating temporary LB policy." -Properties @{
+                            VIP      = $VIP
+                            IntPort  = $InternalPort
+                            ExtPort  = $ExternalPort
+                            Protocol = $Protocol
+                            IsIPv6   = $isIPv6
+                            EndpointId = $epId
+                        }
+
+                        if ($isIPv6) {
+                            $lb = New-HnsLoadBalancer -Endpoints @("$epId") -InternalPort $InternalPort -ExternalPort $ExternalPort -Protocol $Protocol -VIP $VIP -IPv6 -DSR -Verbose
+                        } else {
+                            $lb = New-HnsLoadBalancer -Endpoints @("$epId") -InternalPort $InternalPort -ExternalPort $ExternalPort -Protocol $Protocol -VIP $VIP -DSR -Verbose
+                        }
+
+                        Write-KustoLog -Level 'Info' -Event 'TempLBCreated' -Message "Temporary LB policy created." -Properties @{
+                            PolicyId = $lb.Id
+                            VIP      = $VIP
+                            IntPort  = $InternalPort
+                            ExtPort  = $ExternalPort
+                            Protocol  = $Protocol
+                            EndpointId = $epId
+                        }
+
+                        $lb | Remove-HnsLoadBalancer
+
+                        Write-KustoLog -Level 'Info' -Event 'TempLBDeleted' -Message "Temporary LB policy deleted." -Properties @{
+                            PolicyId = $lb.Id
+                            VIP      = $VIP
+                            IntPort  = $InternalPort
+                            ExtPort  = $ExternalPort
+                            Protocol  = $Protocol
+                            EndpointId = $epId
+                        }
+
+                    } catch {
+                        Write-KustoLog -Level 'Error' -Event 'TempLBFailed' -Message "Failed to create/delete temporary LB policy: $_" -Properties $lbProps
+                    }
+                }
+                Write-KustoLog -Level 'Info' -Event 'LBPolicyCleanupCompleted' -Message "LB policy cleanup completed." -Properties @{ UnmatchedPolicyCount = $unmatchedPolicies.Count }
             }
         }
 
@@ -242,9 +324,9 @@ spec:
         imagePullPolicy: IfNotPresent
         env:
           - name: ITERATION_INTERVAL_SECONDS
-            value: "30"
+            value: "60"
           - name: PASS2_DELAY_SECONDS
-            value: "10"
+            value: "120"
         command:
           - powershell.exe
           - -File
