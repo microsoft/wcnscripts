@@ -1,0 +1,206 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+  namespace: demo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: get-missing-vfp-rules
+  namespace: demo
+data:
+  get-missing-vfp-rules.ps1: |
+
+    $iterationIntervalSeconds = if ($env:ITERATION_INTERVAL_SECONDS) { [int]$env:ITERATION_INTERVAL_SECONDS } else { 60 }
+    $pass2DelaySeconds = if ($env:PASS2_DELAY_SECONDS) { [int]$env:PASS2_DELAY_SECONDS } else { 120 }
+
+    $ServiceIpv4 = $env:ServiceIpv4
+    $ServicePort = $env:ServicePort
+    $ServiceProtocol = $env:ServiceProtocol
+
+    function Write-KustoLog {
+        param(
+            [string]$Level,
+            [string]$Message
+        )
+
+        $log = [ordered]@{
+            Timestamp  = (Get-Date -Format 'o')
+            Level      = $Level
+            Message    = $Message
+            Computer   = $env:COMPUTERNAME
+        }
+        $log | ConvertTo-Json -Compress | Write-Output
+    }
+
+    function IsVfpRuleForHnsLbPolicy {
+        param (
+            [string]$Ipv4Vip,
+            [string]$ExternalPort,
+            [ValidateSet(6, 17)][int]$Protocol
+        )
+
+        $null = Write-KustoLog -Level 'info' -Message  "IsVfpRuleForHnsLbPolicy invoked. Ipv4Vip: $Ipv4Vip, ExternalPort: $ExternalPort, Protocol: $Protocol"
+
+        $lbPolicies = Get-HnsPolicyList
+        $matchingLbId = $null
+        $matchingVfpRuleIdRegex = $null
+
+        foreach ($lbPolicy in $lbPolicies) {
+            $policyJson = ($lbPolicy | convertto-json -depth 10)
+
+            $policyInfo = $lbPolicy.Policies[0]
+            if (-not $policyInfo) {
+                $null = Write-KustoLog -Level 'error' -Message  "Policies empty : $policyJson"
+                return $false
+            }
+
+            if ($policyInfo.VIPs.Count -eq 0) {
+                continue
+            }
+
+            if ($policyInfo.VIPs[0] -eq $Ipv4Vip) {
+                if ($policyInfo.externalport -eq $ExternalPort) {
+                    if ($policyInfo.protocol -eq $Protocol) {
+                        $matchingLbId = $lbPolicy.Resources.Allocators.Id
+                        $matchingVfpRuleIdRegex = "LB_DSR_\S*_$($policyInfo.VIPs[0])_$($policyInfo.ExternalPort)_$($policyInfo.InternalPort)_$($policyInfo.Protocol)_$($matchingLbId.substring(0, 5))`$"
+                        #$null = Write-KustoLog -Level 'error' -Message  "Found matching LB policy : $policyJson"
+                        #$null = Write-KustoLog -Level 'error' -Message  "Found matching LB policy : $($policyInfo | convertto-json -depth 10)"
+                        break
+                    }
+                }
+            }
+        }
+
+        if (-not $matchingVfpRuleIdRegex)
+        {
+            $null = Write-KustoLog -Level 'error' -Message  "No matching policy found in HNS"
+            return $false
+        }
+
+        $vfpPorts = (vfpctrl.exe /list-vmswitch-port /format 1 | ConvertFrom-Json).Ports.Id
+        foreach ($vfpPortId in $vfpPorts) {
+            if (($vfpPortId -match "ExternalPort") -or ($vfpPortId -match "Host Vnic")) {
+                continue
+            }
+
+            $matchingRuleId = $null
+            $groups = (vfpctrl.exe /port $vfpPortId /layer "LB_DSR" /list-rule /format 1 | convertfrom-json).groups
+
+            $ipv4OutboundGroup = ($groups | ? id -match "LB_DSR_IPv4_OUT")
+            $ruleIDs = $ipv4OutboundGroup.rules.id
+            foreach ($ruleID in $ruleIDs) {
+                if ($ruleID -match $matchingVfpRuleIdRegex) {
+                    $matchingRuleId = $ruleID
+                    break
+                }
+            }
+
+            if (-not $matchingRuleId) {
+                $null = Write-KustoLog -Level 'error' -Message  "No matching rule found for regex $matchingVfpRuleIdRegex on port $($vfpPortId) for lb policy $matchingLbId"
+                return $false
+            } else {
+                #Write-KustoLog -Level 'error' -Message  "Found matching rule $matchingRuleId for regex $matchingVfpRuleIdRegex on port $($vfpPortId) for lb policy $matchingLbId"
+            }
+        }
+        return $true
+    }
+
+    Import-Module -Force C:\k\hns.v2.psm1
+
+    $iterationCount = 0
+    while ($true) {
+        $iterationCount += 1
+        Write-KustoLog -Level 'info' -Message "Starting iteration $iterationCount"
+
+        $ruleMissing_before = -not (IsVfpRuleForHnsLbPolicy -Ipv4Vip $ServiceIpv4 -ExternalPort $ServicePort -Protocol $ServiceProtocol)
+        if ($ruleMissing_before) {
+            Write-KustoLog -Level 'error' -Message "Rule missing in VFP in first check"
+        } else {
+            Write-KustoLog -Level 'info' -Message "Rule found in VFP in first check"
+            Start-Sleep -Seconds $iterationIntervalSeconds
+            continue
+        }
+
+        Start-Sleep -Seconds $pass2DelaySeconds
+
+        $ruleMissing_after = -not (IsVfpRuleForHnsLbPolicy -Ipv4Vip $ServiceIpv4 -ExternalPort $ServicePort -Protocol $ServiceProtocol)
+        if ($ruleMissing_after) {
+            Write-KustoLog -Level 'error' -Message "Rule missing in VFP in second check"
+        } else {
+            Write-KustoLog -Level 'info' -Message "Rule found in VFP in second check"
+            Start-Sleep -Seconds $iterationIntervalSeconds
+            continue
+        }
+
+        if ($ruleMissing_before -and $ruleMissing_after) {
+            Write-KustoLog -Level 'error' -Message "Rule missing in VFP when checked twice in $pass2DelaySeconds seconds"
+        }
+
+        Start-Sleep -Seconds $iterationIntervalSeconds
+    }
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: get-missing-vfp-rules
+  namespace: demo
+  labels:
+    app: get-missing-vfp-rules
+spec:
+  selector:
+    matchLabels:
+      app: get-missing-vfp-rules
+  template:
+    metadata:
+      labels:
+        app: get-missing-vfp-rules
+    spec:
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: 'NT AUTHORITY\SYSTEM'
+      hostNetwork: true
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/os
+                operator: In
+                values:
+                - windows
+      containers:
+      - name: get-missing-vfp-rules
+        image: mcr.microsoft.com/dotnet/framework/samples:aspnetapp
+        imagePullPolicy: IfNotPresent
+        env:
+          - name: ITERATION_INTERVAL_SECONDS
+            value: "60"
+          - name: PASS2_DELAY_SECONDS
+            value: "120"
+          - name: ServiceIpv4
+            value: "10.0.0.10"
+          - name: ServicePort
+            value: "53"
+          - name: ServiceProtocol
+            value: "17"
+        command:
+          - powershell.exe
+          - -File
+          - C:\scripts\get-missing-vfp-rules.ps1
+        volumeMounts:
+          - name: script
+            mountPath: C:\scripts
+          - name: kube-path
+            mountPath: C:\k
+      terminationGracePeriodSeconds: 60
+      volumes:
+        - name: script
+          configMap:
+            name: get-missing-vfp-rules
+        - name: kube-path
+          hostPath:
+            path: C:\k
