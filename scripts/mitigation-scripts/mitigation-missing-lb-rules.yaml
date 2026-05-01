@@ -12,36 +12,58 @@ metadata:
 data:
   get-missing-vfp-rules.ps1: |
 
-    $iterationIntervalSeconds = if ($env:ITERATION_INTERVAL_SECONDS) { [int]$env:ITERATION_INTERVAL_SECONDS } else { 60 }
+    $inputDelimiter = ','
+
+    $iterationIntervalSeconds = if ($env:ITERATION_INTERVAL_SECONDS) { [int]$env:ITERATION_INTERVAL_SECONDS } else { 120 }
     $pass2DelaySeconds = if ($env:PASS2_DELAY_SECONDS) { [int]$env:PASS2_DELAY_SECONDS } else { 120 }
 
-    $ServiceIpv4 = $env:ServiceIpv4
-    $ServicePort = $env:ServicePort
-    $ServiceProtocol = $env:ServiceProtocol
+    $tmpStr = $env:Services_To_Check
+    if ($tmpStr.Contains($inputDelimiter)) {
+        $serviceInputs = $tmpStr -split $inputDelimiter
+    } else {
+        $serviceInputs = @($tmpStr)
+    }
+
+    $ServicesToCheck = @()
+    foreach ($serviceInput in $serviceInputs) {
+        $parts = $serviceInput -split '-'
+        $ServicesToCheck += @{
+            Ipv4Vip = $parts[0]
+            ExternalPort = $parts[1]
+            Protocol = $parts[2]
+        }
+    }
 
     function Write-KustoLog {
         param(
             [string]$Level,
             [string]$Message
         )
-
+        #write-output "Write-KustoLog invoked"
         $log = [ordered]@{
             Timestamp  = (Get-Date -Format 'o')
+            Computer   = $env:COMPUTERNAME
             Level      = $Level
             Message    = $Message
-            Computer   = $env:COMPUTERNAME
         }
         $log | ConvertTo-Json -Compress | Write-Output
     }
 
-    function IsVfpRuleForHnsLbPolicy {
+    function IsVfpRuleAndHnsPolicyPresent {
         param (
             [string]$Ipv4Vip,
             [string]$ExternalPort,
             [ValidateSet(6, 17)][int]$Protocol
         )
 
-        $null = Write-KustoLog -Level 'info' -Message  "IsVfpRuleForHnsLbPolicy invoked. Ipv4Vip: $Ipv4Vip, ExternalPort: $ExternalPort, Protocol: $Protocol"
+        $result = @{
+            policyPresentInHns = $false
+            rulePresentInAllVfpPorts = $false
+            policyId = $null
+            ruleId = $null
+        }
+
+        $null = Write-KustoLog -Level 'info' -Message  "IsVfpRuleAndHnsPolicyPresent invoked. Ipv4Vip: $Ipv4Vip, ExternalPort: $ExternalPort, Protocol: $Protocol"
 
         $lbPolicies = Get-HnsPolicyList
         $matchingLbId = $null
@@ -52,8 +74,9 @@ data:
 
             $policyInfo = $lbPolicy.Policies[0]
             if (-not $policyInfo) {
-                $null = Write-KustoLog -Level 'error' -Message  "Policies empty : $policyJson"
-                return $false
+                $null = Write-KustoLog -Level 'error' -Message  "Policy setting empty : $policyJson"
+                # check next policy
+                continue
             }
 
             if ($policyInfo.VIPs.Count -eq 0) {
@@ -76,7 +99,11 @@ data:
         if (-not $matchingVfpRuleIdRegex)
         {
             $null = Write-KustoLog -Level 'error' -Message  "No matching policy found in HNS"
-            return $false
+            $result.policyPresentInHns = $false
+            return $result
+        } else {
+            $result.policyPresentInHns = $true
+            $result.policyId = $matchingLbId
         }
 
         $vfpPorts = (vfpctrl.exe /list-vmswitch-port /format 1 | ConvertFrom-Json).Ports.Id
@@ -86,25 +113,25 @@ data:
             }
 
             $matchingRuleId = $null
-            $groups = (vfpctrl.exe /port $vfpPortId /layer "LB_DSR" /list-rule /format 1 | convertfrom-json).groups
-
-            $ipv4OutboundGroup = ($groups | ? id -match "LB_DSR_IPv4_OUT")
-            $ruleIDs = $ipv4OutboundGroup.rules.id
+            $ruleIDs = ((vfpctrl.exe /port $vfpPortId /layer "LB_DSR" /list-rule /format 1 | convertfrom-json).groups | ? id -match "LB_DSR_IPv4_OUT").rules.id
             foreach ($ruleID in $ruleIDs) {
                 if ($ruleID -match $matchingVfpRuleIdRegex) {
                     $matchingRuleId = $ruleID
+                    $result.ruleId = $matchingRuleId
                     break
                 }
             }
 
             if (-not $matchingRuleId) {
                 $null = Write-KustoLog -Level 'error' -Message  "No matching rule found for regex $matchingVfpRuleIdRegex on port $($vfpPortId) for lb policy $matchingLbId"
-                return $false
+                $result.rulePresentInAllVfpPorts = $false
+                return $result
             } else {
                 #Write-KustoLog -Level 'error' -Message  "Found matching rule $matchingRuleId for regex $matchingVfpRuleIdRegex on port $($vfpPortId) for lb policy $matchingLbId"
             }
         }
-        return $true
+        $result.rulePresentInAllVfpPorts = $true
+        return $result
     }
 
     Import-Module -Force C:\k\hns.v2.psm1
@@ -114,28 +141,61 @@ data:
         $iterationCount += 1
         Write-KustoLog -Level 'info' -Message "Starting iteration $iterationCount"
 
-        $ruleMissing_before = -not (IsVfpRuleForHnsLbPolicy -Ipv4Vip $ServiceIpv4 -ExternalPort $ServicePort -Protocol $ServiceProtocol)
-        if ($ruleMissing_before) {
-            Write-KustoLog -Level 'error' -Message "Rule missing in VFP in first check"
-        } else {
-            Write-KustoLog -Level 'info' -Message "Rule found in VFP in first check"
-            Start-Sleep -Seconds $iterationIntervalSeconds
-            continue
-        }
+        foreach ($serviceToCheck in $ServicesToCheck) {
 
-        Start-Sleep -Seconds $pass2DelaySeconds
+            $ServiceIpv4 = $serviceToCheck.Ipv4Vip
+            $ServicePort = $serviceToCheck.ExternalPort
+            $l4Protocol = $serviceToCheck.Protocol
+            $serviceDetails = ($serviceToCheck | convertto-json -compress)
 
-        $ruleMissing_after = -not (IsVfpRuleForHnsLbPolicy -Ipv4Vip $ServiceIpv4 -ExternalPort $ServicePort -Protocol $ServiceProtocol)
-        if ($ruleMissing_after) {
-            Write-KustoLog -Level 'error' -Message "Rule missing in VFP in second check"
-        } else {
-            Write-KustoLog -Level 'info' -Message "Rule found in VFP in second check"
-            Start-Sleep -Seconds $iterationIntervalSeconds
-            continue
-        }
+            $resultBefore = (IsVfpRuleAndHnsPolicyPresent -Ipv4Vip $ServiceIpv4 -ExternalPort $ServicePort -Protocol $l4Protocol)
+            if (-not $resultBefore.policyPresentInHns) {
+                Write-KustoLog -Level 'error' -Message "first check: LB policy not present in HNS for $serviceDetails. Skipping VFP rule check."
+                continue
+            }
+            if ($resultBefore.ruleId) {
+                Write-KustoLog -Level 'info' -Message "first check: non-null RuleId $($resultBefore.ruleId) for $serviceDetails"
+            } else {
+                Write-KustoLog -Level 'info' -Message "first check: is-null RuleId $($resultBefore.ruleId) for $serviceDetails"
+            }
+            
+            $ruleMissing_before = -not ($resultBefore.rulePresentInAllVfpPorts)
+            if ($ruleMissing_before) {
+                Write-KustoLog -Level 'error' -Message "first check: Rule missing in VFP for $serviceDetails"
+            } else {
+                Write-KustoLog -Level 'info' -Message "first check: Rule found in VFP for $serviceDetails"
+                continue
+            }
 
-        if ($ruleMissing_before -and $ruleMissing_after) {
-            Write-KustoLog -Level 'error' -Message "Rule missing in VFP when checked twice in $pass2DelaySeconds seconds"
+            Start-Sleep -Seconds $pass2DelaySeconds
+
+            $resultAfter = (IsVfpRuleAndHnsPolicyPresent -Ipv4Vip $ServiceIpv4 -ExternalPort $ServicePort -Protocol $l4Protocol)
+            if (-not $resultAfter.policyPresentInHns) {
+                Write-KustoLog -Level 'error' -Message "second check: LB policy not present in HNS for $serviceDetails. Skipping VFP rule check."
+                continue
+            }
+            if ($resultAfter.ruleId) {
+                Write-KustoLog -Level 'info' -Message "second check: non-null RuleId $($resultAfter.ruleId) for $serviceDetails"
+            } else {
+                Write-KustoLog -Level 'info' -Message "second check: is-null RuleId $($resultAfter.ruleId) for $serviceDetails"
+            }
+
+            $ruleMissing_after = -not ($resultAfter.rulePresentInAllVfpPorts)
+            if ($ruleMissing_after) {
+                Write-KustoLog -Level 'error' -Message "second check: Rule missing in VFP for $serviceDetails"
+            } else {
+                Write-KustoLog -Level 'info' -Message "second check: Rule found in VFP for $serviceDetails"
+                continue
+            }
+
+            if ($ruleMissing_before -and $ruleMissing_after) {
+                Write-KustoLog -Level 'error' -Message "Rule missing in VFP in both first and second check $pass2DelaySeconds seconds apart for $serviceDetails"
+                if ($resultAfter.policyId -eq $resultBefore.policyId) {
+                    Write-KustoLog -Level 'error' -Message "Rule missing in VFP in both checks for $serviceDetails, policy IDs matching before and after, $($resultBefore.policyId), $($resultAfter.policyId)"
+                } else {
+                    Write-KustoLog -Level 'error' -Message "Rule missing in VFP in both checks for $serviceDetails, policy IDs mis-matching before and after, $($resultBefore.policyId), $($resultAfter.policyId)"
+                }
+            }
         }
 
         Start-Sleep -Seconds $iterationIntervalSeconds
@@ -181,12 +241,8 @@ spec:
             value: "60"
           - name: PASS2_DELAY_SECONDS
             value: "120"
-          - name: ServiceIpv4
-            value: "10.0.0.10"
-          - name: ServicePort
-            value: "53"
-          - name: ServiceProtocol
-            value: "17"
+          - name: Services_To_Check
+            value: "10.0.0.10-53-17,10.0.0.10-53-6"
         command:
           - powershell.exe
           - -File
