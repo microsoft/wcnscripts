@@ -145,7 +145,7 @@ function Test-DnsFromPod {
     }
 }
 
-$sleepInSeconds = 10 # 5 minutes
+$sleepInSeconds = 300 # 5 minutes
 
 While($true) {
     Write-Host "Checking for ports with missing DNS rules..."
