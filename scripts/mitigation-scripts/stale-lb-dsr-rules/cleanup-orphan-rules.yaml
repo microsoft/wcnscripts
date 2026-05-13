@@ -1,9 +1,9 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: demo
-  namespace: demo
----
+# apiVersion: v1
+# kind: Namespace
+# metadata:
+#   name: demo
+#   namespace: demo
+# ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -33,15 +33,26 @@ data:
 
     Import-Module -Force C:\k\hns.v2.psm1
 
-    $nw = Get-HnsNetwork | Where Name -Eq azure
-    $nodeIpv4 = $nw.ManagementIP
-    $nodeIpv6 = $nw.ManagementIPv6
+    $ipConfig = Get-NetIPConfiguration
+    if ($ipConfig -eq $null) {
+        Write-KustoLog -Level 'Error' -Event 'NoIPConfig' -Message 'No IP configuration found on the node.'
+        exit 1
+    }
+    if ($ipConfig.IPv4Address -ne $null -or $ipConfig.IPv4Address -ne "" -or $ipConfig.IPv4Address.IPAddress -ne $null -or $ipConfig.IPv4Address.IPAddress -ne "") {
+        $nodeIpv4 = $ipConfig.IPv4Address.IPAddress
+    }
+    if ($ipConfig.IPv6Address -ne $null -or $ipConfig.IPv6Address -ne "" -or $ipConfig.IPv6Address.IPAddress -ne $null -or $ipConfig.IPv6Address.IPAddress -ne "") {
+        $nodeIpv6 = $ipConfig.IPv6Address.IPAddress
+    }
+    if ($nodeIpv4 -eq $null -or $nodeIpv4 -eq "") {
+        Write-KustoLog -Level 'Error' -Event 'NoNodeIP' -Message 'No valid IPv4 address found on the node.'
+        exit 1
+    }
 
     Write-KustoLog -Level 'Info' -Event 'ScriptStarted' -Message 'Cleanup orphan rules script started.' -Properties @{
         NodeIPv4 = $nodeIpv4
         NodeIPv6 = $nodeIpv6
     }
-
 
     function Get-ExpectedVfpRuleIds {
         param(
@@ -166,9 +177,30 @@ data:
         $expVfpRuleIdsBefore = Get-ExpectedVfpRuleIds -nodeIPv4 $nodeIpv4 -nodeIPv6 $nodeIpv6 -hnsPolicies $hnsPolicies
         $staleVfpRuleIdsBefore = Get-StaleVfpRuleIds -expVfpRuleIds $expVfpRuleIdsBefore
         Write-KustoLog -Level 'Info' -Event 'Pass1Completed' -Message 'First pass completed.' -Properties @{
+            NodeIPv4         = $nodeIpv4
+            NodeIPv6         = $nodeIpv6
             ExpectedRuleCount = $expVfpRuleIdsBefore.Count
             StaleRuleCount    = $staleVfpRuleIdsBefore.Count
         }
+
+
+        Write-KustoLog -Level 'Info' -Event 'ExpectedVfpRuleBeforeStart' -Message "Start of expected VFP rule IDs." -Properties @{ Count = $expVfpRuleIdsBefore.Count }
+        foreach ($ruleId in $expVfpRuleIdsBefore.Keys) {
+            Write-KustoLog -Level 'Info' -Event 'ExpectedVfpRuleBefore' -Message "Expected VFP rule ID." -Properties @{ RuleId = $ruleId }
+        }
+        Write-KustoLog -Level 'Info' -Event 'ExpectedVfpRuleBeforeEnd' -Message "End of expected VFP rule IDs." -Properties @{ Count = $expVfpRuleIdsBefore.Count }
+
+        Write-KustoLog -Level 'Info' -Event 'StaleVfpRuleBeforeStart' -Message "Start of stale VFP rule IDs." -Properties @{ Count = $staleVfpRuleIdsBefore.Count }
+        foreach ($key in $staleVfpRuleIdsBefore.Keys) {
+            $entry = $staleVfpRuleIdsBefore[$key]
+            Write-KustoLog -Level 'Info' -Event 'StaleVfpRuleBefore' -Message "Stale VFP rule ID." -Properties @{
+                Port   = $entry.Port
+                Layer  = $entry.Layer
+                Group  = $entry.Group
+                RuleId = $entry.RuleId
+            }
+        }
+        Write-KustoLog -Level 'Info' -Event 'StaleVfpRuleBeforeEnd' -Message "End of stale VFP rule IDs." -Properties @{ Count = $staleVfpRuleIdsBefore.Count }
 
         Start-Sleep -Seconds $pass2DelaySeconds
 
