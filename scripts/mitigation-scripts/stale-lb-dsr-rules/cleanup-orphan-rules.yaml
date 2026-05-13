@@ -1,0 +1,378 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+  namespace: demo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cleanup-orphan-rules
+  namespace: demo
+data:
+  cleanup-orphan-rules.ps1: |
+    function Write-KustoLog {
+        param(
+            [string]$Level,
+            [string]$Event,
+            [string]$Message,
+            [hashtable]$Properties = @{}
+        )
+        $log = [ordered]@{
+            Timestamp  = (Get-Date -Format 'o')
+            Level      = $Level
+            Event      = $Event
+            Message    = $Message
+            Computer   = $env:COMPUTERNAME
+        }
+        foreach ($k in $Properties.Keys) {
+            $log[$k] = $Properties[$k]
+        }
+        $log | ConvertTo-Json -Compress | Write-Output
+    }
+
+    Import-Module -Force C:\k\hns.v2.psm1
+
+    $ipConfig = Get-NetIPConfiguration
+    if ($ipConfig -eq $null) {
+        Write-KustoLog -Level 'Error' -Event 'NoIPConfig' -Message 'No IP configuration found on the node.'
+        exit 1
+    }
+    if ($ipConfig.IPv4Address -ne $null -or $ipConfig.IPv4Address -ne "" -or $ipConfig.IPv4Address.IPAddress -ne $null -or $ipConfig.IPv4Address.IPAddress -ne "") {
+        $nodeIpv4 = $ipConfig.IPv4Address.IPAddress
+    }
+    if ($ipConfig.IPv6Address -ne $null -or $ipConfig.IPv6Address -ne "" -or $ipConfig.IPv6Address.IPAddress -ne $null -or $ipConfig.IPv6Address.IPAddress -ne "") {
+        $nodeIpv6 = $ipConfig.IPv6Address.IPAddress
+    }
+    if ($nodeIpv4 -eq $null -or $nodeIpv4 -eq "") {
+        Write-KustoLog -Level 'Error' -Event 'NoNodeIP' -Message 'No valid IPv4 address found on the node.'
+        exit 1
+    }
+
+    Write-KustoLog -Level 'Info' -Event 'ScriptStarted' -Message 'Cleanup orphan rules script started.' -Properties @{
+        NodeIPv4 = $nodeIpv4
+        NodeIPv6 = $nodeIpv6
+    }
+
+    function Get-ExpectedVfpRuleIds {
+        param(
+            [string]$nodeIPv4,
+            [string]$nodeIPv6,
+            [array]$hnsPolicies
+        )
+
+        $expVfpRuleIds = @{}
+
+        foreach ($policy in $hnsPolicies) {
+            $pol = $policy.Policies[0]
+            $alloc = $policy.Resources.Allocators[0]
+
+            # Skip non-DSR policies
+            if (-not $alloc.IsDSR) { continue }
+
+            $extPort  = $pol.ExternalPort
+            $intPort  = $pol.InternalPort
+            $protocol = $pol.Protocol
+            $idPrefix = $alloc.ID.Substring(0,5).ToUpper()
+
+            # Determine nodeIP based on IPv6 flag
+            if ($pol.IPv6 -or $alloc.IsIpv6) {
+                if (-not $nodeIPv6) { continue }
+                $nodeIP = $nodeIPv6
+            } else {
+                $nodeIP = $nodeIPv4
+            }
+
+            # VIP: use VIPs[0] if present, otherwise nodeIP
+            if ($pol.VIPs -and $pol.VIPs.Count -gt 0) {
+                $vip = $pol.VIPs[0]
+            } else {
+                $vip = $nodeIP
+            }
+
+            $expVfpRuleId = "LB_DSR_${nodeIP}_${vip}_${extPort}_${intPort}_${protocol}_${idPrefix}"
+            $expVfpRuleIds[$expVfpRuleId] = $true
+        }
+
+        return $expVfpRuleIds
+    }
+
+    function Get-StaleVfpRuleIds {
+        param(
+            [hashtable]$expVfpRuleIds
+        )
+
+        $staleVfpRuleIds = @{}
+        $groups = @("LB_DSR_IPv4_OUT", "LB_DSR_IPv6_OUT")
+        $ports = (vfpctrl.exe /list-vmswitch-port /format 1 | ConvertFrom-Json).Ports.Name
+        foreach ($port in $ports) {
+            foreach ($group in $groups) {
+                $rules = (vfpctrl /port $port /layer LB_DSR /group $group /list-rule /format 1 | ConvertFrom-Json).Rules
+                foreach ($rule in $rules) {
+                    $ruleId = $rule.Id
+                    if ($expVfpRuleIds[$ruleId] -eq $null) {
+                        # Skip nodePort rules (destination port > 30000 and < 32768)
+                        $parts = $ruleId -split '_'
+                        $extPort = [int]$parts[$parts.Count - 4]
+                        if ($extPort -ge 30000 -and $extPort -lt 32768) { continue }
+
+                        $key = "${port}::${ruleId}"
+                        $staleVfpRuleIds[$key] = @{
+                            Port   = $port
+                            Layer  = "LB_DSR"
+                            Group  = $group
+                            RuleId = $ruleId
+                        }
+                    }
+                }
+            }
+        }
+
+        return $staleVfpRuleIds
+    }
+
+    function Test-VfpRuleHasMatchingPolicy {
+        param(
+            [string]$port,
+            [string]$layer,
+            [string]$group,
+            [string]$ruleId,
+            [array]$hnsPolicies
+        )
+
+        $obj = (vfpctrl /get-rule-info /port $port /layer $layer /group $group /rule $ruleId /format 1 | ConvertFrom-Json).Rules
+
+        $protocol = $obj.Conditions | Where-Object { $_.ProtocolList } | ForEach-Object { $_.ProtocolList[0] }
+
+        $destIP = $obj.Conditions | Where-Object { $_.DestinationIPv4RangeList -or $_.DestinationIPv6RangeList } | ForEach-Object {
+            if ($_.DestinationIPv4RangeList) { $_.DestinationIPv4RangeList[0].H }
+            elseif ($_.DestinationIPv6RangeList) { $_.DestinationIPv6RangeList[0].H }
+        }
+
+        $destPort = $obj.Conditions | Where-Object { $_.DestinationPortList } | ForEach-Object { $_.DestinationPortList[0] }
+
+        $found = $hnsPolicies | Where-Object {
+            $_.Policies[0].VIPs -contains $destIP -and
+            $_.Policies[0].ExternalPort -eq $destPort -and
+            $_.Policies[0].Protocol -eq $protocol
+        }
+
+        if ($found) {
+            return $null
+        }
+        return @{ DestIP = $destIP; DestPort = $destPort; Protocol = $protocol }
+    }
+
+    $iterationIntervalSeconds = if ($env:ITERATION_INTERVAL_SECONDS) { [int]$env:ITERATION_INTERVAL_SECONDS } else { 60 }
+    $pass2DelaySeconds = if ($env:PASS2_DELAY_SECONDS) { [int]$env:PASS2_DELAY_SECONDS } else { 120 }
+
+    Write-KustoLog -Level 'Info' -Event 'ConfigLoaded' -Message 'Configuration loaded.' -Properties @{
+        IterationIntervalSeconds = $iterationIntervalSeconds
+        Pass2DelaySeconds        = $pass2DelaySeconds
+    }
+
+    while ($true) {
+        $hnsPolicies = Get-HnsPolicyList
+        Write-KustoLog -Level 'Info' -Event 'Pass1Started' -Message 'First pass: collecting expected and stale VFP rule IDs.' -Properties @{ PolicyCount = $hnsPolicies.Count }
+        $expVfpRuleIdsBefore = Get-ExpectedVfpRuleIds -nodeIPv4 $nodeIpv4 -nodeIPv6 $nodeIpv6 -hnsPolicies $hnsPolicies
+        $staleVfpRuleIdsBefore = Get-StaleVfpRuleIds -expVfpRuleIds $expVfpRuleIdsBefore
+        Write-KustoLog -Level 'Info' -Event 'Pass1Completed' -Message 'First pass completed.' -Properties @{
+            NodeIPv4         = $nodeIpv4
+            NodeIPv6         = $nodeIpv6
+            ExpectedRuleCount = $expVfpRuleIdsBefore.Count
+            StaleRuleCount    = $staleVfpRuleIdsBefore.Count
+        }
+
+
+        Write-KustoLog -Level 'Info' -Event 'ExpectedVfpRuleBeforeStart' -Message "Start of expected VFP rule IDs." -Properties @{ Count = $expVfpRuleIdsBefore.Count }
+        foreach ($ruleId in $expVfpRuleIdsBefore.Keys) {
+            Write-KustoLog -Level 'Info' -Event 'ExpectedVfpRuleBefore' -Message "Expected VFP rule ID." -Properties @{ RuleId = $ruleId }
+        }
+        Write-KustoLog -Level 'Info' -Event 'ExpectedVfpRuleBeforeEnd' -Message "End of expected VFP rule IDs." -Properties @{ Count = $expVfpRuleIdsBefore.Count }
+
+        Write-KustoLog -Level 'Info' -Event 'StaleVfpRuleBeforeStart' -Message "Start of stale VFP rule IDs." -Properties @{ Count = $staleVfpRuleIdsBefore.Count }
+        foreach ($key in $staleVfpRuleIdsBefore.Keys) {
+            $entry = $staleVfpRuleIdsBefore[$key]
+            Write-KustoLog -Level 'Info' -Event 'StaleVfpRuleBefore' -Message "Stale VFP rule ID." -Properties @{
+                Port   = $entry.Port
+                Layer  = $entry.Layer
+                Group  = $entry.Group
+                RuleId = $entry.RuleId
+            }
+        }
+        Write-KustoLog -Level 'Info' -Event 'StaleVfpRuleBeforeEnd' -Message "End of stale VFP rule IDs." -Properties @{ Count = $staleVfpRuleIdsBefore.Count }
+
+        Start-Sleep -Seconds $pass2DelaySeconds
+
+        $hnsPolicies = Get-HnsPolicyList
+        Write-KustoLog -Level 'Info' -Event 'Pass2Started' -Message 'Second pass: collecting expected and stale VFP rule IDs.' -Properties @{ PolicyCount = $hnsPolicies.Count }
+        $expVfpRuleIdsAfter = Get-ExpectedVfpRuleIds -nodeIPv4 $nodeIpv4 -nodeIPv6 $nodeIpv6 -hnsPolicies $hnsPolicies
+        $staleVfpRuleIdsAfter = Get-StaleVfpRuleIds -expVfpRuleIds $expVfpRuleIdsAfter
+        Write-KustoLog -Level 'Info' -Event 'Pass2Completed' -Message 'Second pass completed.' -Properties @{
+            ExpectedRuleCount = $expVfpRuleIdsAfter.Count
+            StaleRuleCount    = $staleVfpRuleIdsAfter.Count
+        }
+
+        $orphanVfpRules = @{}
+        foreach ($key in $staleVfpRuleIdsBefore.Keys) {
+            if ($staleVfpRuleIdsAfter.ContainsKey($key)) {
+                $orphanVfpRules[$key] = $staleVfpRuleIdsAfter[$key]
+            }
+        }
+
+        Write-KustoLog -Level 'Info' -Event 'OrphanDetection' -Message 'Orphan detection completed.' -Properties @{ OrphanRuleCount = $orphanVfpRules.Count }
+
+        if ($orphanVfpRules.Count -eq 0) {
+            Write-KustoLog -Level 'Info' -Event 'NoOrphanRules' -Message 'No orphan VFP rules found.'
+        } else {
+            $hnsPolicies = Get-HnsPolicyList
+            $unmatchedPolicies = @{}
+            foreach ($entry in $orphanVfpRules.Values) {
+                $ruleProps = @{
+                    Port   = $entry.Port
+                    Layer  = $entry.Layer
+                    Group  = $entry.Group
+                    RuleId = $entry.RuleId
+                }
+
+                $result = Test-VfpRuleHasMatchingPolicy -port $entry.Port -layer $entry.Layer -group $entry.Group -ruleId $entry.RuleId -hnsPolicies $hnsPolicies
+                if ($result) {
+                    Write-KustoLog -Level 'Warning' -Event 'OrphanRuleDetected' -Message "Orphan VFP rule detected." -Properties $ruleProps
+                    # Remove the orphan rule
+                    vfpctrl /remove-rule /port $entry.Port /layer $entry.Layer /group $entry.Group /rule $entry.RuleId
+                    Write-KustoLog -Level 'Info' -Event 'OrphanRuleRemoved' -Message "Orphan VFP rule removed." -Properties $ruleProps
+                    # Collect unique VIP/port/protocol for LB create+delete
+                    $ruleIdParts = $entry.RuleId -split '_'
+                    $result.IntPort = [int]$ruleIdParts[-3]
+                    $policyKey = "$($result.DestIP)::$($result.DestPort)::$($result.Protocol)"
+                    if (-not $unmatchedPolicies.ContainsKey($policyKey)) {
+                        $unmatchedPolicies[$policyKey] = $result
+                    }
+                }
+            }
+
+            # Create and delete temporary LB policies to force HNS cleanup of stale VFP rules
+            if ($unmatchedPolicies.Count -gt 0) {
+                Write-KustoLog -Level 'Info' -Event 'LBPolicyCleanup' -Message "Creating and deleting temporary LB policies to trigger cleanup." -Properties @{ UnmatchedPolicyCount = $unmatchedPolicies.Count }
+                ipmo -Force C:\k\hns.v2.psm1
+                $ipStackCount = (Get-HnsNetwork)[0].Ipams.Count
+                $epId = (Get-HnsEndpoint | Where-Object { $_.IpConfigurations.Count -ge $ipStackCount })[0].Id
+                Write-KustoLog -Level 'Info' -Event 'EndpointSelection' -Message "Endpoints selected for LB cleanup." -Properties @{
+                    EndpointId = if ($epId) { $epId } else { 'none' }
+                }
+                foreach ($policy in $unmatchedPolicies.Values) {
+                    $isIPv6 = $policy.DestIP -match ':'
+
+                    try {
+                        $VIP = $policy.DestIP
+                        $InternalPort = $policy.IntPort
+                        $ExternalPort = $policy.DestPort
+                        $Protocol     = $policy.Protocol
+
+                        if ($VIP -eq  $null -or $InternalPort -eq $null -or $ExternalPort -eq $null -or $Protocol -eq $null) {
+                            continue
+                        }
+
+                        Write-KustoLog -Level 'Info' -Event 'TempLBCreateStart' -Message "Creating temporary LB policy." -Properties @{
+                            VIP      = $VIP
+                            IntPort  = $InternalPort
+                            ExtPort  = $ExternalPort
+                            Protocol = $Protocol
+                            IsIPv6   = $isIPv6
+                            EndpointId = $epId
+                        }
+
+                        if ($isIPv6) {
+                            $lb = New-HnsLoadBalancer -Endpoints @("$epId") -InternalPort $InternalPort -ExternalPort $ExternalPort -Protocol $Protocol -VIP $VIP -IPv6 -DSR -Verbose
+                        } else {
+                            $lb = New-HnsLoadBalancer -Endpoints @("$epId") -InternalPort $InternalPort -ExternalPort $ExternalPort -Protocol $Protocol -VIP $VIP -DSR -Verbose
+                        }
+
+                        Write-KustoLog -Level 'Info' -Event 'TempLBCreated' -Message "Temporary LB policy created." -Properties @{
+                            PolicyId = $lb.Id
+                            VIP      = $VIP
+                            IntPort  = $InternalPort
+                            ExtPort  = $ExternalPort
+                            Protocol  = $Protocol
+                            EndpointId = $epId
+                        }
+
+                        $lb | Remove-HnsLoadBalancer
+
+                        Write-KustoLog -Level 'Info' -Event 'TempLBDeleted' -Message "Temporary LB policy deleted." -Properties @{
+                            PolicyId = $lb.Id
+                            VIP      = $VIP
+                            IntPort  = $InternalPort
+                            ExtPort  = $ExternalPort
+                            Protocol  = $Protocol
+                            EndpointId = $epId
+                        }
+
+                    } catch {
+                        Write-KustoLog -Level 'Error' -Event 'TempLBFailed' -Message "Failed to create/delete temporary LB policy: $_" -Properties $lbProps
+                    }
+                }
+                Write-KustoLog -Level 'Info' -Event 'LBPolicyCleanupCompleted' -Message "LB policy cleanup completed." -Properties @{ UnmatchedPolicyCount = $unmatchedPolicies.Count }
+            }
+        }
+
+        Write-KustoLog -Level 'Info' -Event 'IterationCompleted' -Message "Iteration completed. Sleeping for $iterationIntervalSeconds seconds."
+        Start-Sleep -Seconds $iterationIntervalSeconds
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cleanup-orphan-rules
+  namespace: demo
+  labels:
+    app: cleanup-orphan-rules
+spec:
+  selector:
+    matchLabels:
+      app: cleanup-orphan-rules
+  template:
+    metadata:
+      labels:
+        app: cleanup-orphan-rules
+    spec:
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: 'NT AUTHORITY\SYSTEM'
+      hostNetwork: true
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/os
+                operator: In
+                values:
+                - windows
+      containers:
+      - name: cleanup-orphan-rules
+        image: mcr.microsoft.com/dotnet/framework/samples:aspnetapp
+        imagePullPolicy: IfNotPresent
+        env:
+          - name: ITERATION_INTERVAL_SECONDS
+            value: "60"
+          - name: PASS2_DELAY_SECONDS
+            value: "120"
+        command:
+          - powershell.exe
+          - -File
+          - C:\scripts\cleanup-orphan-rules.ps1
+        volumeMounts:
+          - name: script
+            mountPath: C:\scripts
+          - name: kube-path
+            mountPath: C:\k
+      terminationGracePeriodSeconds: 60
+      volumes:
+        - name: script
+          configMap:
+            name: cleanup-orphan-rules
+        - name: kube-path
+          hostPath:
+            path: C:\k

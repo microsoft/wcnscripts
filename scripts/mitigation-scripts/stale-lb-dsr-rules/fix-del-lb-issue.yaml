@@ -1,0 +1,81 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+  namespace: demo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: check-hns-issue
+  namespace: demo
+data:
+  mitigate-del-lb-issue.ps1: |
+
+    $regKeyVal = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Policies\Microsoft\FeatureManagement\Overrides" -Name 140377743).140377743
+    if ($regKeyVal -eq 1) {
+        Write-Host "Registry keys are not zero. Setting reg key to 0 and restarting the node." -ForegroundColor Yellow
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Policies\Microsoft\FeatureManagement\Overrides" -Name 140377743 -Value 0 -Type DWORD
+        Restart-Computer -Force
+        Start-Sleep -Seconds 30
+    } else {
+        Write-Host "Registry keys are zero. Continuing the script." -ForegroundColor Green
+    }
+
+    While($true) {
+      Write-Host "Registry keys are disabled...." -ForegroundColor Cyan
+      Start-Sleep -Seconds 36000
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: del-lb-fail-mitigator
+  namespace: demo
+  labels:
+    app: del-lb-fail-mitigator
+spec:
+  selector:
+    matchLabels:
+      app: del-lb-fail-mitigator
+  template:
+    metadata:
+      labels:
+        app: del-lb-fail-mitigator
+    spec:
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: 'NT AUTHORITY\SYSTEM'
+      hostNetwork: true
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/os
+                operator: In
+                values:
+                - windows
+      containers:
+      - name: del-lb-fail-mitigator
+        image: mcr.microsoft.com/dotnet/framework/samples:aspnetapp
+        imagePullPolicy: IfNotPresent
+        command:
+          - powershell.exe
+          - -File
+          - C:\scripts\mitigate-del-lb-issue.ps1
+        volumeMounts:
+          - name: script
+            mountPath: C:\scripts
+          - name: kube-path
+            mountPath: C:\k
+      terminationGracePeriodSeconds: 60
+      volumes:
+        - name: script
+          configMap:
+            name: check-hns-issue
+        - name: kube-path
+          hostPath:
+            path: C:\k
+            type: DirectoryOrCreate
