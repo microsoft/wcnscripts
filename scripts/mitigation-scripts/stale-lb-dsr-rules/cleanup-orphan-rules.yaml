@@ -1,9 +1,9 @@
-# apiVersion: v1
-# kind: Namespace
-# metadata:
-#   name: demo
-#   namespace: demo
-# ---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+  namespace: demo
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
